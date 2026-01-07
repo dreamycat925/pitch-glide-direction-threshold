@@ -34,19 +34,18 @@ st.markdown(
 2AFCで「どちらが *下がる音*（DOWN; 最初に下降するグライド）か」を答えてもらい、  
 **方向弁別が可能になる最小のグライド長（duration, ms）**を推定します（= 速い変化ほど難しい）。
 
-**誤答の近道を避ける設計**  
+**近道（開始ピッチ手がかり）を避ける設計**  
 UP/DOWN の開始周波数・終了周波数を同一にするため、グライド部は **三角形（triangular）**の周波数変化にしています。  
 - UP: 最初に上昇 → 中盤でピーク → 終盤で中心周波数に戻る  
 - DOWN: 最初に下降 → 中盤でボトム → 終盤で中心周波数に戻る  
 その後に定常部（steady tone）を付加します。
 
 **注意**  
-- 必ず **有線ヘッドホン**（Bluetooth不可推奨）  
+- なるべく **有線ヘッドホン**（Bluetoothは遅延や途切れの原因になり得ます）  
 - 音量は事前に快適レベルに調整  
 - 原則 **replayしない**運用（提示は1回を想定）
 """
 )
-
 
 # ============================================================
 # Presets
@@ -55,7 +54,6 @@ PRESETS = {
     "1240 Hz版（F2帯寄り：900–1580 Hz）": {"f_center": 1240.0, "delta": 340.0},
     "500 Hz版（低周波：350–650 Hz）": {"f_center": 500.0, "delta": 150.0},
 }
-
 
 # ============================================================
 # Audio helpers
@@ -343,7 +341,7 @@ def init_state():
         "awaiting_answer": False,
         "staircase": None,
         "test_trial_n": 0,
-        "max_trials_allowed": 50,
+        "max_trials_allowed": 100,
         "threshold_live_ms": None,
         "threshold_final_ms": None,
         "finished_reason": None,  # "threshold" | "max_trials" | "manual"
@@ -387,7 +385,14 @@ with st.sidebar:
     steady_ms = st.number_input("定常部 (ms)", min_value=50, max_value=500, value=200, step=10)
     isi_ms = st.number_input("A-B間ISI (ms)", min_value=200, max_value=1500, value=800, step=50)
     ramp_ms = st.number_input("ramp (ms)", min_value=0, max_value=30, value=10, step=1)
-    target_rms = st.number_input("RMS正規化 target", min_value=0.01, max_value=0.3, value=0.10, step=0.01, format="%.2f")
+    target_rms = st.number_input(
+        "RMS正規化 target",
+        min_value=0.01,
+        max_value=0.3,
+        value=0.10,
+        step=0.01,
+        format="%.2f",
+    )
 
     st.divider()
     st.subheader("Staircase（duration ms）")
@@ -399,15 +404,10 @@ with st.sidebar:
     step_small_ms = st.number_input("小ステップ (ms)", min_value=1, max_value=100, value=20, step=1)
     switch_after = st.number_input("大→小 切替reversal数", min_value=1, max_value=10, value=4, step=1)
 
-    max_trials_base = st.number_input("最大trial（基本）", min_value=20, max_value=200, value=50, step=5)
-    max_trials_extended = st.number_input("最大trial（延長上限）", min_value=int(max_trials_base), max_value=300, value=70, step=5)
-    extend_by = st.number_input("延長幅（trial）", min_value=5, max_value=50, value=10, step=5)
-
+    max_trials = st.number_input("最大trial（上限=100）", min_value=20, max_value=100, value=100, step=5)
     practice_n = st.number_input("練習trial数", min_value=0, max_value=30, value=10, step=1)
 
     st.divider()
-    examiner_mode = st.checkbox("検査者モード（正解や内部状態を表示）", value=False)
-
     if st.button("🧹 全リセット"):
         reset_all()
         st.rerun()
@@ -431,9 +431,7 @@ def snapshot_settings() -> Dict[str, Any]:
         "step_big_ms": float(step_big_ms),
         "step_small_ms": float(step_small_ms),
         "switch_after": int(switch_after),
-        "max_trials_base": int(max_trials_base),
-        "max_trials_extended": int(max_trials_extended),
-        "extend_by": int(extend_by),
+        "max_trials": int(max_trials),
         "practice_n": int(practice_n),
     }
 
@@ -476,7 +474,7 @@ def start_test():
     st.session_state["test_settings"] = snapshot_settings()
 
     s = st.session_state["test_settings"]
-    st.session_state["max_trials_allowed"] = int(s["max_trials_base"])
+    st.session_state["max_trials_allowed"] = int(s["max_trials"])
     st.session_state["staircase"] = DurationStaircase(
         start_ms=float(s["start_ms"]),
         floor_ms=float(s["floor_ms"]),
@@ -488,11 +486,11 @@ def start_test():
     st.session_state["test_trial_n"] = 0
 
 
-def finish_test(reason: str):
+def finish_block(reason: str):
+    """Finish current block (practice/test) and show results."""
     st.session_state["mode"] = "finished"
     st.session_state["finished_reason"] = reason
     st.session_state["awaiting_answer"] = False
-    # keep trial/log but hide audio
     st.session_state["trial"] = None
 
 
@@ -545,7 +543,9 @@ def record_response(subject_id: str, response_interval: int):
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "subject_id": subject_id,
         "mode": mode,
-        "trial_in_block": st.session_state.get("practice_n_done", 0) + 1 if mode == "practice" else st.session_state.get("test_trial_n", 0) + 1,
+        "trial_in_block": st.session_state.get("practice_n_done", 0) + 1
+        if mode == "practice"
+        else st.session_state.get("test_trial_n", 0) + 1,
         "D_ms_presented": int(trial["D_ms"]),
         "down_interval": correct_interval,
         "response": int(response_interval),
@@ -566,6 +566,11 @@ def record_response(subject_id: str, response_interval: int):
         st.session_state["practice_n_done"] += 1
         st.session_state["awaiting_answer"] = False
         st.session_state["trial"] = None  # hide audio to discourage replay
+
+        # auto-finish practice when completed -> back to idle (logs remain)
+        ps = st.session_state.get("practice_settings") or snapshot_settings()
+        if st.session_state["practice_n_done"] >= int(ps["practice_n"]):
+            st.session_state["mode"] = "idle"
         return
 
     # test mode: update staircase
@@ -598,91 +603,79 @@ def record_response(subject_id: str, response_interval: int):
     # stopping rules
     if live is not None:
         st.session_state["threshold_final_ms"] = live
-        finish_test("threshold")
+        finish_block("threshold")
         return
 
-    # max-trial logic (+extend_by up to max_trials_extended)
-    s = st.session_state.get("test_settings") or snapshot_settings()
     if sc.trial_index >= int(st.session_state["max_trials_allowed"]):
-        if st.session_state["max_trials_allowed"] < int(s["max_trials_extended"]):
-            st.session_state["max_trials_allowed"] = min(
-                int(s["max_trials_extended"]),
-                int(st.session_state["max_trials_allowed"]) + int(s["extend_by"]),
-            )
-        else:
-            finish_test("max_trials")
+        finish_block("max_trials")
 
 
 # ============================================================
 # Top controls
 # ============================================================
+def _practice_target_n() -> int:
+    ps = st.session_state.get("practice_settings") or snapshot_settings()
+    return int(ps["practice_n"])
+
+
+mode = st.session_state["mode"]
+practice_target_n = _practice_target_n()
+
 c1, c2, c3 = st.columns([1, 1, 1])
 with c1:
     st.button(
         "🧪 練習を開始",
-        disabled=(st.session_state["mode"] in ["practice", "test"]),
+        disabled=(mode in ["practice", "test"]),
         on_click=start_practice,
     )
 with c2:
     st.button(
         "🎯 本番を開始",
-        disabled=(st.session_state["mode"] in ["practice", "test"]),
+        disabled=(mode in ["practice", "test"]),
         on_click=start_test,
     )
 with c3:
     st.button(
         "⏹️ 終了（結果表示）",
-        disabled=(st.session_state["mode"] not in ["practice", "test"]),
-        on_click=lambda: finish_test("manual"),
+        disabled=(mode not in ["practice", "test"]),
+        on_click=lambda: finish_block("manual"),
     )
 
 st.divider()
 
 # ============================================================
-# Status metrics
+# Status metrics (always shown)
 # ============================================================
-mode = st.session_state["mode"]
 sc: Optional[DurationStaircase] = st.session_state.get("staircase", None)
 
-mcols = st.columns(5)
-mcols[0].metric("mode", mode)
-if mode == "practice":
-    target_n = int((st.session_state.get("practice_settings") or snapshot_settings())["practice_n"])
-    mcols[1].metric("practice", f"{st.session_state['practice_n_done']}/{target_n}")
-else:
-    mcols[1].metric("trial", f"{st.session_state.get('test_trial_n', 0)}")
-mcols[2].metric("reversals", f"{len(sc.reversals) if sc else 0}")
-mcols[3].metric("small rev", f"{sc.n_small_reversals() if sc else 0}")
+mcols = st.columns(6)
+mcols[0].metric("mode", st.session_state["mode"])
+mcols[1].metric("practice", f"{st.session_state['practice_n_done']}/{practice_target_n}")
+mcols[2].metric("trial", f"{st.session_state.get('test_trial_n', 0)}")
+mcols[3].metric("reversals", f"{len(sc.reversals) if sc else 0}")
+mcols[4].metric("small rev", f"{sc.n_small_reversals() if sc else 0}")
+
 live_ms = st.session_state.get("threshold_live_ms", None)
-floor_for_fmt = float((st.session_state.get("test_settings") or snapshot_settings())["floor_ms"])
-ceil_for_fmt = float((st.session_state.get("test_settings") or snapshot_settings())["ceil_ms"])
-mcols[4].metric("暫定閾値", format_threshold(live_ms, floor_for_fmt, ceil_for_fmt))
+ts = st.session_state.get("test_settings") or snapshot_settings()
+mcols[5].metric("暫定閾値", format_threshold(live_ms, float(ts["floor_ms"]), float(ts["ceil_ms"])))
 
-if mode == "test":
-    s = st.session_state.get("test_settings") or snapshot_settings()
-    st.caption(f"現在の最大trial: {st.session_state['max_trials_allowed']}（不足時は {s['extend_by']} ずつ延長、最大 {s['max_trials_extended']}）")
-elif mode == "practice":
-    s = st.session_state.get("practice_settings") or snapshot_settings()
-    st.caption("※練習/本番を開始すると、設定は固定（ロック）されます。")
-
+st.caption(f"本番の最大trial: **{int(ts['max_trials'])}**（上限=100） / 練習trial: **{practice_target_n}**")
 
 # ============================================================
-# Main interaction
+# Main interaction (practice/test)
 # ============================================================
 if mode == "idle":
     st.info("上のボタンから **練習** または **本番** を開始してください。設定は左のサイドバーで変更できます。")
-    st.stop()
 
-if mode == "practice":
-    s = st.session_state.get("practice_settings") or snapshot_settings()
+elif mode == "practice":
+    ps = st.session_state.get("practice_settings") or snapshot_settings()
     st.subheader("🧪 練習")
     st.caption("練習は **固定D（開始D）**で実施し、フィードバックを表示します。")
 
-    if st.session_state["practice_n_done"] >= int(s["practice_n"]):
-        st.success("練習が終了しました。必要なら本番を開始してください。")
-        st.stop()
+    if st.session_state["practice_n_done"] >= int(ps["practice_n"]):
+        st.success("練習が終了しました。上のボタンから本番を開始できます。")
 
-    if not st.session_state["awaiting_answer"]:
+    if not st.session_state["awaiting_answer"] and st.session_state["practice_n_done"] < int(ps["practice_n"]):
         if st.button("▶️ 提示（練習）"):
             make_new_trial("practice")
             st.rerun()
@@ -696,7 +689,7 @@ if mode == "practice":
         with b1:
             if st.button("1"):
                 resp = 1
-                correct = trial["correct_interval"]
+                correct = int(trial["correct_interval"])
                 record_response(subject_id, resp)
                 if resp == correct:
                     st.success("正解")
@@ -706,7 +699,7 @@ if mode == "practice":
         with b2:
             if st.button("2"):
                 resp = 2
-                correct = trial["correct_interval"]
+                correct = int(trial["correct_interval"])
                 record_response(subject_id, resp)
                 if resp == correct:
                     st.success("正解")
@@ -714,12 +707,10 @@ if mode == "practice":
                     st.error(f"不正解（正解は {correct}）")
                 st.rerun()
 
-    st.stop()
-
-if mode == "test":
-    s = st.session_state.get("test_settings") or snapshot_settings()
+elif mode == "test":
+    ts = st.session_state.get("test_settings") or snapshot_settings()
     st.subheader("🎯 本番（2AFC + staircase）")
-    st.caption("本番ではフィードバックなし（検査者モードONなら正解などを表示）")
+    st.caption("本番ではフィードバックなし（結果は下のタブで常に確認できます）")
 
     if not st.session_state["awaiting_answer"]:
         if st.button("▶️ 提示（A→無音→B）"):
@@ -729,7 +720,6 @@ if mode == "test":
     trial = st.session_state.get("trial")
     if st.session_state["awaiting_answer"] and trial:
         st.audio(trial["wav"], format="audio/wav", autoplay=True)
-
         st.markdown("**質問**：どちらが **下がる音（DOWN）** でしたか？（1回目=1 / 2回目=2）")
 
         a1, a2 = st.columns(2)
@@ -742,59 +732,65 @@ if mode == "test":
                 record_response(subject_id, 2)
                 st.rerun()
 
-        if examiner_mode:
-            st.info(f"検査者モード：D={trial['D_ms']} ms / correct={trial['correct_interval']} / order={trial['order']}")
-
-    st.stop()
-
 # ============================================================
-# Finished / Results
+# Results (always visible)
 # ============================================================
-st.subheader("📌 結果")
+st.divider()
+st.subheader("📌 結果・ログ（常時表示）")
 
-s = st.session_state.get("test_settings") or snapshot_settings()
-final_ms = st.session_state.get("threshold_final_ms", None)
-reason = st.session_state.get("finished_reason")
+tab_summary, tab_test, tab_practice = st.tabs(["概要", "本番ログ", "練習ログ"])
 
-if reason == "threshold" and final_ms is not None:
-    st.success(f"収束：推定閾値（duration） = {format_threshold(final_ms, float(s['floor_ms']), float(s['ceil_ms']))}")
-    rate = sweep_rate_hz_per_s(float(s["delta"]), float(final_ms))
-    st.write(f"- 等価sweep rate（三角形グライド片側）: **{rate:.0f} Hz/s**")
-    st.caption("※三角形グライドでは、最大偏移Δfに到達するのが D/2 なので rate=2000×Δf/D で換算しています。")
-elif reason == "manual":
-    st.info("手動終了しました（閾値推定は未確定の可能性があります）。")
-    if st.session_state.get("threshold_live_ms") is not None:
-        st.write(f"- 暫定閾値: {format_threshold(st.session_state['threshold_live_ms'], float(s['floor_ms']), float(s['ceil_ms']))}")
-else:
-    st.warning("閾値が十分に収束しませんでした（no reliable threshold）。")
-    if reason == "max_trials":
-        st.write(f"- 最大trial（{s['max_trials_extended']}）まで到達")
+with tab_summary:
+    ts = st.session_state.get("test_settings") or snapshot_settings()
+    final_ms = st.session_state.get("threshold_final_ms", None)
+    reason = st.session_state.get("finished_reason")
 
-# Show reversal list (optional)
-sc = st.session_state.get("staircase")
-if examiner_mode and sc is not None and getattr(sc, "reversals", None):
-    st.markdown("#### reversals（検査者モード）")
-    st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True)
+    if reason == "threshold" and final_ms is not None:
+        st.success(f"収束：推定閾値（duration） = {format_threshold(final_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
+        rate = sweep_rate_hz_per_s(float(ts["delta"]), float(final_ms))
+        st.write(f"- 等価sweep rate（三角形グライド片側）: **{rate:.0f} Hz/s**")
+        st.caption("※三角形グライドでは、最大偏移Δfに到達するのが D/2 なので rate=2000×Δf/D で換算しています。")
+    elif reason == "manual":
+        st.info("手動終了しました（閾値推定は未確定の可能性があります）。")
+        if st.session_state.get("threshold_live_ms") is not None:
+            st.write(f"- 暫定閾値: {format_threshold(st.session_state['threshold_live_ms'], float(ts['floor_ms']), float(ts['ceil_ms']))}")
+    elif reason == "max_trials":
+        st.warning(f"最大trial（{int(ts['max_trials'])}）まで到達しました（閾値は未収束の可能性があります）。")
+        if st.session_state.get("threshold_live_ms") is not None:
+            st.write(f"- 暫定閾値: {format_threshold(st.session_state['threshold_live_ms'], float(ts['floor_ms']), float(ts['ceil_ms']))}")
+    else:
+        st.caption("本番を実施すると、ここに収束状況が表示されます。")
 
-# Logs download
-st.markdown("### ⬇️ ログ")
-if st.session_state.get("test_log"):
-    df = pd.DataFrame(st.session_state["test_log"])
-    st.dataframe(df, use_container_width=True, height=240)
-    st.download_button(
-        "CSVダウンロード（本番）",
-        data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="pitch_glide_direction_threshold_log_test.csv",
-        mime="text/csv",
-    )
-elif st.session_state.get("practice_log"):
-    df = pd.DataFrame(st.session_state["practice_log"])
-    st.dataframe(df, use_container_width=True, height=240)
-    st.download_button(
-        "CSVダウンロード（練習）",
-        data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="pitch_glide_direction_threshold_log_practice.csv",
-        mime="text/csv",
-    )
-else:
-    st.caption("ログはまだありません。")
+    # Reversals table (if available)
+    sc = st.session_state.get("staircase")
+    if sc is not None and getattr(sc, "reversals", None):
+        st.markdown("#### reversals")
+        st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True, height=220)
+
+with tab_test:
+    if st.session_state.get("test_log"):
+        df_test = pd.DataFrame(st.session_state["test_log"])
+        st.dataframe(df_test, use_container_width=True, height=320)
+        st.download_button(
+            "CSVダウンロード（本番）",
+            data=df_test.to_csv(index=False).encode("utf-8-sig"),
+            file_name="pitch_glide_direction_threshold_log_test.csv",
+            mime="text/csv",
+        )
+    else:
+        st.caption("本番ログはまだありません。")
+
+with tab_practice:
+    if st.session_state.get("practice_log"):
+        df_pr = pd.DataFrame(st.session_state["practice_log"])
+        acc = float(df_pr["is_correct"].mean()) * 100.0 if len(df_pr) else float("nan")
+        st.write(f"正答率（練習）: **{acc:.1f}%**  （n={len(df_pr)}）")
+        st.dataframe(df_pr, use_container_width=True, height=320)
+        st.download_button(
+            "CSVダウンロード（練習）",
+            data=df_pr.to_csv(index=False).encode("utf-8-sig"),
+            file_name="pitch_glide_direction_threshold_log_practice.csv",
+            mime="text/csv",
+        )
+    else:
+        st.caption("練習ログはまだありません。")
