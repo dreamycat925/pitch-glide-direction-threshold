@@ -349,6 +349,7 @@ def init_state():
         # lock settings at block start (to prevent mid-run sidebar edits)
         "practice_settings": None,
         "test_settings": None,
+        "results_tab": "本番タブ",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -460,6 +461,7 @@ def start_practice():
     st.session_state["threshold_final_ms"] = None
     st.session_state["started_at"] = time.time()
     st.session_state["practice_settings"] = snapshot_settings()
+    st.session_state["results_tab"] = "練習タブ"
 
 
 def start_test():
@@ -472,6 +474,7 @@ def start_test():
     st.session_state["finished_reason"] = None
     st.session_state["started_at"] = time.time()
     st.session_state["test_settings"] = snapshot_settings()
+    st.session_state["results_tab"] = "本番タブ"
 
     s = st.session_state["test_settings"]
     st.session_state["max_trials_allowed"] = int(s["max_trials"])
@@ -492,6 +495,7 @@ def finish_block(reason: str):
     st.session_state["finished_reason"] = reason
     st.session_state["awaiting_answer"] = False
     st.session_state["trial"] = None
+    st.session_state["results_tab"] = "結果サマリー"
 
 
 def make_new_trial(mode: str):
@@ -736,41 +740,42 @@ elif mode == "test":
 # Results (always visible)
 # ============================================================
 st.divider()
-st.subheader("📌 結果・ログ（常時表示）")
+st.subheader("📌 ログ・結果（常時表示）")
 
-tab_summary, tab_test, tab_practice = st.tabs(["概要", "本番ログ", "練習ログ"])
+# タブ表示はrerunのたびに初期化されやすいので、session_stateで保持します。
+# 本番中は「本番タブ」を固定表示（ボタンを押しても戻らない）にします。
+if st.session_state["mode"] == "test":
+    st.session_state["results_tab"] = "本番タブ"
+elif st.session_state["mode"] == "practice":
+    st.session_state["results_tab"] = "練習タブ"
 
-with tab_summary:
-    ts = st.session_state.get("test_settings") or snapshot_settings()
-    final_ms = st.session_state.get("threshold_final_ms", None)
-    reason = st.session_state.get("finished_reason")
+active_results_tab = st.radio(
+    "表示",
+    ["練習タブ", "本番タブ", "結果サマリー"],
+    key="results_tab",
+    horizontal=True,
+    label_visibility="collapsed",
+)
 
-    if reason == "threshold" and final_ms is not None:
-        st.success(f"収束：推定閾値（duration） = {format_threshold(final_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
-        rate = sweep_rate_hz_per_s(float(ts["delta"]), float(final_ms))
-        st.write(f"- 等価sweep rate（三角形グライド片側）: **{rate:.0f} Hz/s**")
-        st.caption("※三角形グライドでは、最大偏移Δfに到達するのが D/2 なので rate=2000×Δf/D で換算しています。")
-    elif reason == "manual":
-        st.info("手動終了しました（閾値推定は未確定の可能性があります）。")
-        if st.session_state.get("threshold_live_ms") is not None:
-            st.write(f"- 暫定閾値: {format_threshold(st.session_state['threshold_live_ms'], float(ts['floor_ms']), float(ts['ceil_ms']))}")
-    elif reason == "max_trials":
-        st.warning(f"最大trial（{int(ts['max_trials'])}）まで到達しました（閾値は未収束の可能性があります）。")
-        if st.session_state.get("threshold_live_ms") is not None:
-            st.write(f"- 暫定閾値: {format_threshold(st.session_state['threshold_live_ms'], float(ts['floor_ms']), float(ts['ceil_ms']))}")
+if active_results_tab == "練習タブ":
+    if st.session_state.get("practice_log"):
+        df_pr = pd.DataFrame(st.session_state["practice_log"])
+        acc = float(df_pr["is_correct"].mean()) * 100.0 if len(df_pr) else float("nan")
+        st.write(f"正答率（練習）: **{acc:.1f}%**  （n={len(df_pr)}）")
+        st.dataframe(df_pr, use_container_width=True, height=360)
+        st.download_button(
+            "CSVダウンロード（練習）",
+            data=df_pr.to_csv(index=False).encode("utf-8-sig"),
+            file_name="pitch_glide_direction_threshold_log_practice.csv",
+            mime="text/csv",
+        )
     else:
-        st.caption("本番を実施すると、ここに収束状況が表示されます。")
+        st.caption("練習ログはまだありません。")
 
-    # Reversals table (if available)
-    sc = st.session_state.get("staircase")
-    if sc is not None and getattr(sc, "reversals", None):
-        st.markdown("#### reversals")
-        st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True, height=220)
-
-with tab_test:
+elif active_results_tab == "本番タブ":
     if st.session_state.get("test_log"):
         df_test = pd.DataFrame(st.session_state["test_log"])
-        st.dataframe(df_test, use_container_width=True, height=320)
+        st.dataframe(df_test, use_container_width=True, height=360)
         st.download_button(
             "CSVダウンロード（本番）",
             data=df_test.to_csv(index=False).encode("utf-8-sig"),
@@ -780,17 +785,49 @@ with tab_test:
     else:
         st.caption("本番ログはまだありません。")
 
-with tab_practice:
-    if st.session_state.get("practice_log"):
-        df_pr = pd.DataFrame(st.session_state["practice_log"])
-        acc = float(df_pr["is_correct"].mean()) * 100.0 if len(df_pr) else float("nan")
-        st.write(f"正答率（練習）: **{acc:.1f}%**  （n={len(df_pr)}）")
-        st.dataframe(df_pr, use_container_width=True, height=320)
-        st.download_button(
-            "CSVダウンロード（練習）",
-            data=df_pr.to_csv(index=False).encode("utf-8-sig"),
-            file_name="pitch_glide_direction_threshold_log_practice.csv",
-            mime="text/csv",
-        )
+else:  # 結果サマリー
+    ts = st.session_state.get("test_settings")
+    reason = st.session_state.get("finished_reason")
+    final_ms = st.session_state.get("threshold_final_ms", None)
+    live_ms = st.session_state.get("threshold_live_ms", None)
+
+    # 本番が「終了」しているときのみまとめを出す
+    if not ts or reason is None or not st.session_state.get("test_log"):
+        st.caption("本番を実施して終了すると、ここに結果サマリーが表示されます。")
     else:
-        st.caption("練習ログはまだありません。")
+        ts = ts or snapshot_settings()
+        df_test = pd.DataFrame(st.session_state["test_log"])
+        n_trials = len(df_test)
+
+        sc = st.session_state.get("staircase")
+        n_rev = len(sc.reversals) if sc is not None and getattr(sc, "reversals", None) else 0
+        n_small_rev = sc.n_small_reversals() if sc is not None else 0
+
+        # --- outcome ---
+        if reason == "threshold" and final_ms is not None:
+            st.success(f"収束：推定閾値（duration） = {format_threshold(final_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
+            rate = sweep_rate_hz_per_s(float(ts["delta"]), float(final_ms))
+            st.write(f"- 等価sweep rate（三角形グライド片側）: **{rate:.0f} Hz/s**")
+            st.caption("※三角形グライドでは、最大偏移Δfに到達するのが D/2 なので rate=2000×Δf/D で換算しています。")
+        elif reason == "max_trials":
+            st.warning(f"最大trial（{int(ts['max_trials'])}）まで到達（未収束の可能性）")
+            if live_ms is not None:
+                st.write(f"- 暫定閾値: {format_threshold(live_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
+        elif reason == "manual":
+            st.info("手動終了（未収束の可能性）")
+            if live_ms is not None:
+                st.write(f"- 暫定閾値: {format_threshold(live_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
+
+        st.markdown("#### 条件（本番）")
+        st.write(f"- プリセット: **{ts['preset_name']}**  / f_center={float(ts['f_center']):.0f} Hz / Δf=±{float(ts['delta']):.0f} Hz")
+        st.write(f"- 出力: {ts['ear']}  / SR={int(ts['sr'])} Hz  / 定常={int(ts['steady_ms'])} ms  / ISI={int(ts['isi_ms'])} ms")
+        st.write(f"- ramp={int(ts['ramp_ms'])} ms / target_rms={float(ts['target_rms']):.2f}")
+        st.write(f"- Staircase: start={float(ts['start_ms']):.0f} ms, floor={float(ts['floor_ms']):.0f} ms, ceil={float(ts['ceil_ms']):.0f} ms")
+        st.write(f"- step_big={float(ts['step_big_ms']):.0f} ms（rev {int(ts['switch_after'])}回まで）, step_small={float(ts['step_small_ms']):.0f} ms")
+
+        st.markdown("#### 実施状況")
+        st.write(f"- trial数: **{n_trials}** / reversals: **{n_rev}** / small-step reversals: **{n_small_rev}**")
+
+        if sc is not None and getattr(sc, "reversals", None):
+            with st.expander("reversals（本番）", expanded=False):
+                st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True, height=260)
