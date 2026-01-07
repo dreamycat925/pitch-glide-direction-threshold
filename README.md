@@ -1,142 +1,130 @@
-# Frequency Modulation (FM) Auditory Test for Streamlit
+# Pitch Glide Direction Threshold Test (PGDT) for Streamlit
 
 **Purpose**  
-A browser-based application for testing **frequency modulation (FM) detection** at low and high modulation rates (e.g., **2 Hz** and **40 Hz**) using pure tones.  
-The app is intended as a **simple clinical / research prototype** for assessing sensitivity to **slow and fast pitch fluctuations** (e.g., prosody-like vs. phoneme-like cues) and is designed to work on **iPhone/Safari** with **wired headphones**.
+A browser-based application for estimating the **direction-discrimination threshold** for a **pitch glide** (frequency glide / tone sweep).  
+The test adaptively finds the **minimum glide duration (ms)** required to judge which interval contains a **DOWN glide** (initially descending), i.e., the ability to track **rapid pitch transitions** that may contribute to **environmental sound / melody perception**.
+
+This app is intended as a **clinical / research prototype** (not a medical device).
 
 ---
 
 ## 🌐 Live Demo
 
-**Try the FM app here:**  
-[https://dreamycat925-frequency-modul-fm-modulation-streamlit-app-7wrg4f.streamlit.app/](https://dreamycat925-frequency-modul-fm-modulation-streamlit-app-7wrg4f.streamlit.app/)
+**Try the PGDT app here:**  
+`<PUT_YOUR_STREAMLIT_CLOUD_URL_HERE>`
 
-(If the app does not load, please check that Streamlit Community Cloud is running and your network allows external HTTPS connections.)
+(If the app does not load, Streamlit Community Cloud may be sleeping; open the URL once to wake it up.)
 
 ---
 
 ## Features
 
-- Pure-tone carrier (default: **500 Hz**, adjustable)
-- Adjustable **FM rate** (default: 2 Hz or 40 Hz via shortcut buttons, free range 0.5–100 Hz)
-- Discrete **FM depth grid** matching typical psychophysical ranges:
-
-  - `0.01, 0.02, 0.03, 0.04, 0.05,`
-  - `0.06, 0.07, 0.08, 0.09, 0.10,`
-  - `0.20, 0.30, 0.40, 0.50`
-
-  Here, `depth ≈ Δf/f` (fraction of carrier frequency).  
-  For a 500 Hz carrier:
-  - depth 0.01 ≈ ±1% (495–505 Hz)
-  - depth 0.02 ≈ ±2% (490–510 Hz)
-  - …
-  - depth 0.10 ≈ ±10% (450–550 Hz)
-  - depth 0.50 ≈ ±50% (250–750 Hz; very large, for practice/heavy impairment)
-
-- Single-tone playback:
-  - **“FMなし（フラット）”**: unmodulated reference tone
-  - **“FMあり（変調）”**: FM tone at the current depth/rate
-  - **“ランダム”**: either FMあり or FMなし, randomized each time
-- Fully synthesized in Python/NumPy and served via `st.audio` (WAV); no external audio server is required
-- Works in modern desktop and mobile browsers, including **iPhone/Safari**, as long as wired headphones are used
-
-> Note: Unlike the Click Fusion Test app, this FM app currently does **not** include built-in CSV logging.  
-> Response logging and staircase control are intended to be done on paper or in a separate spreadsheet.
-
----
-
-## Demo
-
-> (You can insert screenshots or GIFs here, e.g., sidebar with FM rate/depth and the three playback buttons.)
+- **Two frequency presets** (selectable):
+  - **1240 Hz preset (F2-band-like)**: `f_center=1240 Hz`, `Δf=±340 Hz` (900–1580 Hz)
+  - **500 Hz preset (low-frequency)**: `f_center=500 Hz`, `Δf=±150 Hz` (350–650 Hz)
+- **Output**: diotic (both ears), left-only, or right-only
+- **Stimulus** (per interval):
+  - **Triangular pitch glide** (starts at `f_center`, moves to `f_center±Δf`, returns to `f_center`)
+  - + **steady-state** segment (default 200 ms)
+  - **Cosine ramp** (default 10 ms), **RMS normalization** (default target 0.10)
+- **Task** (2AFC): A → (ISI) → B  
+  Prompt: **“Which interval was the DOWN glide? 1 or 2”**
+- **Practice block**: default **10 trials**, with feedback
+- **Adaptive threshold (staircase)**:
+  - **2-down 1-up** on **glide duration D (ms)** (targets ~70.7%)
+  - defaults: `start=300 ms`, `D_min=20 ms`, `D_max=500 ms`
+  - steps: **40 ms** until the **4th reversal**, then **20 ms**
+  - **Stop rule**: threshold defined when **6 small-step reversals** are collected
+  - **Max trials**: up to **100**
+- **Counterbalanced answer position**:
+  - Selectable: **Series 1 / Series 2 / Series 3 / Fully random**
+  - Series 1–3 are fixed 1–50 trial sequences (from the paper record sheet)
+  - For >50 trials, the series repeats from the beginning (51=1, 52=2, ...)
+- **Logging & export**:
+  - Practice log CSV
+  - Test log CSV
+  - Result summary after the **test block is finished**
+- Fully synthesized in Python/NumPy and served via `st.audio` (WAV); **no external audio server** required
 
 ---
 
 ## Quick Start Guide
 
-1. **Hardware / environment**
-   - Use **wired, closed-back headphones**.  
-     Bluetooth and speakers are not recommended due to latency and potential distortion.
-   - Test in a **quiet room**.
+### 1) Hardware / environment
+- Use **wired, closed-back headphones** (recommended).
+  - **Bluetooth is not recommended** (latency / compression / unpredictable level).
+- Test in a **quiet room**.
+- Keep device + headphones consistent for reference data.
 
-2. **Basic settings**
-   - Open the live app URL in a modern browser.
-   - In the sidebar, leave defaults or set:
-     - Sampling rate: e.g., **44,100 Hz**
-     - Carrier: **500 Hz**
-     - Duration: **1,000 ms**
-   - Use the shortcut buttons to set the FM rate:
-     - `2 Hz` button → slow, prosody-like fluctuation
-     - `40 Hz` button → faster, rougher modulation (more phoneme-like)
+> ⚠️ **Safety**: start at a comfortable listening level. This app does **not** calibrate absolute dB SPL.
 
-3. **FM depth selection**
-   - Choose a depth from the discrete list:
-     - For **practice / demonstration**: start with **0.30–0.50** (very obvious wobble)
-     - For **clinical / research testing**: use **0.01–0.10**, especially **0.02–0.05**
+### 2) Basic settings (sidebar)
+- Choose **Preset**: 1240 Hz or 500 Hz
+- Choose **Sequence**: Series 1/2/3 (recommended for validation) or Random
+- Leave defaults unless you have a reason to change:
+  - Sampling rate: 44,100 Hz
+  - ISI: 800 ms
+  - Steady segment: 200 ms
+  - Ramp: 10 ms
+  - Staircase: start 300 ms, min 20 ms, max 500 ms, step 40→20, switch after 4 reversals
+  - Max trials: 100
 
-4. **Playing stimuli**
-   - Use the three buttons in the main area:
-     - **FMなし（フラット）**: play reference tone
-     - **FMあり（変調）**: play modulated tone
-     - **ランダム（一発）**: play either FMあり or FMなし (random); the app displays which one was presented (“FMあり”/“FMなし”) for the examiner only
+> Note: Settings are **snapshotted at the start of each block** (practice/test).  
+> If you change settings mid-block, they won’t affect the running block. Use reset if needed.
 
-5. **Patient instructions (example, Japanese)**
-   > 「これから『ピー』という音を聞いていただきます。  
-   > まっすぐな音と、少し“揺れている音”が出ます。  
-   > 今の音は揺れていましたか？ それとも、まっすぐでしたか？」
+### 3) Practice block (examiner-operated)
+- Click **Start Practice**
+- On each trial:
+  1. Play the stimulus (A→ISI→B)
+  2. Ask the patient which interval was **DOWN**
+  3. The examiner clicks **1** or **2**
+- Practice includes feedback and is useful to ensure task understanding.
 
-   The examiner can record the patient’s responses and compare them to the “last random stimulus” label shown on screen.
+### 4) Test block
+- Click **Start Test**
+- Run until:
+  - 6 small-step reversals are collected (threshold computed), or
+  - max trials (100) reached (marked as not converged)
+
+### 5) Result summary & CSV
+- After the test ends, open **Result Summary**:
+  - Final threshold **D (ms)**
+  - Convergence / stop reason
+  - Optional converted sweep-rate metric
+- Download CSV logs for audit/tracking.
 
 ---
 
-## Recommended Clinical Implementation (Prototype)
+## Patient instructions (example, Japanese)
 
-These are suggested settings for a **simple, clinically usable protocol**, inspired by FM detection literature and core auditory processing studies in PPA:
+> 「これから2回、短い音を続けて流します。  
+> どちらか一方は、最初に“下がる”感じの音が入っています。  
+> “下がる音”が **1回目**なら『1』、**2回目**なら『2』と教えてください。」
 
-### 1. Practice
+(Examiner enters the response on the PC. The patient does not need to touch the device.)
 
-- **FM rate**: 2 Hz (slow)
-- **Depth**: 0.30–0.50  
-  - Alternate **FMなし** and **FMあり** to demonstrate the “wobbling” sensation.
-  - Ensure the patient reliably understands what “揺れている音” means.
+---
 
-### 2. Screening at suprathreshold
+## Scoring
 
-- **FM rate**: 2 Hz and 40 Hz (both tested)
-- **Depth**: 0.10 (±10%)  
-- Procedure:
-  - Use the **ランダム** button for ~20 trials at depth 0.10.
-  - Ask on each trial: “今の音は揺れていましたか？”（yes/no or “揺れている/いない”）
-  - A rough rule of thumb:
-    - ≥ 80% correct → FM detection at this depth is likely intact.
-    - < 60–70% correct → consider increasing depth (e.g., 0.20) and repeating, or suspect reduced FM sensitivity.
+### Primary outcome
+- **Threshold (ms)** = mean of the **last 6 reversals during the small-step phase**
 
-### 3. Rough threshold estimation (simple mini-staircase)
+### Optional secondary metric: sweep rate (Hz/s)
+Because the glide is triangular, the instantaneous slope during the first half is:
 
-For more detailed assessment (e.g., in research or advanced clinical use):
+- **sweep_rate (Hz/s) = 2000 × Δf / D**
 
-- **FM rate**:  
-  - 2 Hz → slow modulation (prosodic / TFS-like)  
-  - 40 Hz → faster modulation (roughness / phoneme-like)
-- **Depth levels** (example grid):  
-  `0.01, 0.02, 0.03, 0.04, 0.05, 0.07, 0.10`
-- Start at an easy depth (e.g., 0.10), then:
-
-  - If the patient answers correctly (FMあり vs なし) → move **one step down** (smaller depth)
-  - If the patient answers incorrectly → move **two steps up** (larger depth)
-
-- Stop after **2 reversals** or ~10–12 trials per condition.
-- The depth around the last reversal(s) can be taken as a **rough FM detection zone**:
-  - e.g., “2 Hz FM ≈ depth 0.02–0.03”, “40 Hz FM ≈ depth 0.04–0.06”.
-
-> For routine clinical work, this “rough zone” is often sufficient;  
-> for formal psychophysics, a more rigorous staircase (e.g., 2-down 1-up with 6–8 reversals) would be needed.
+where:
+- `Δf` is the preset frequency deviation (1240 preset: 340 Hz; 500 preset: 150 Hz)
+- `D` is the glide duration in ms
 
 ---
 
 ## Local Installation
 
 ```bash
-git clone https://github.com/<you>/<repo>.git
-cd <repo>
+git clone https://github.com/<you>/<pitch-glide-threshold-test>.git
+cd <pitch-glide-threshold-test>
 pip install -r requirements.txt
-streamlit run fm_modulation_streamlit_app.py
+streamlit run pitch_glide_direction_threshold_streamlit_app.py
