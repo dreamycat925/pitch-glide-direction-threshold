@@ -56,33 +56,6 @@ PRESETS = {
 }
 
 # ============================================================
-# Answer sequences (DOWN interval position)
-# - 「系列1〜3」は、記録用紙に記載された 1〜50 trial の固定系列です。
-# - 50 trialを超える場合は、同じ系列を先頭から繰り返します（51=1, 52=2, ...）。
-# ============================================================
-SEQUENCE_OPTIONS = ["系列1", "系列2", "系列3", "完全アトランダム"]
-SERIES_SEQUENCES = {
-    "系列1": [2, 1, 2, 2, 1, 1, 2, 1, 2, 1, 1, 2, 2, 1, 2, 1, 2, 2, 1, 2, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 1, 2, 1, 2, 2, 2, 1, 1, 2, 1, 1, 1, 2, 2, 1, 2, 1, 2, 2],
-    "系列2": [2, 1, 2, 1, 2, 1, 2, 1, 1, 2, 1, 2, 2, 2, 1, 2, 1, 2, 1, 2, 1, 1, 2, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 1, 1, 2, 1, 2, 1, 2, 1, 1, 2, 2, 1, 2, 1, 2, 1, 1],
-    "系列3": [1, 2, 2, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 2, 2, 1, 2, 1, 2, 2, 1, 1, 1, 2, 1, 1, 1, 2],
-}
-
-def get_down_interval(sequence_mode: str, trial_no: int) -> Optional[int]:
-    """Return predetermined DOWN interval (1/2) for the given trial_no, or None for random."""
-    if sequence_mode in SERIES_SEQUENCES:
-        seq = SERIES_SEQUENCES[sequence_mode]
-        idx = (int(trial_no) - 1) % len(seq)
-        return int(seq[idx])
-    return None
-
-def get_sequence_position(sequence_mode: str, trial_no: int) -> Optional[int]:
-    """1-based position in the 1–50 table (or None for random)."""
-    if sequence_mode in SERIES_SEQUENCES:
-        return int(((int(trial_no) - 1) % len(SERIES_SEQUENCES[sequence_mode])) + 1)
-    return None
-
-
-# ============================================================
 # Audio helpers
 # ============================================================
 def _cosine_ramp_env(n: int, sr: int, ramp_ms: int) -> np.ndarray:
@@ -402,18 +375,34 @@ with st.sidebar:
 
     preset_name = st.radio("周波数帯（プリセット）", list(PRESETS.keys()), index=0)
     f_center = float(PRESETS[preset_name]["f_center"])
-    delta = float(PRESETS[preset_name]["delta"])
-    st.caption(f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{delta:.0f} Hz**")
+    default_delta = float(PRESETS[preset_name]["delta"])
+
+    # Δf（delta）を手動で調整できるようにする（既定値はプリセット）
+    # ※プリセット変更時はΔfを既定値へ戻す
+    if "pg_prev_preset" not in st.session_state:
+        st.session_state["pg_prev_preset"] = preset_name
+    if "delta_hz" not in st.session_state:
+        st.session_state["delta_hz"] = default_delta
+    if st.session_state["pg_prev_preset"] != preset_name:
+        st.session_state["delta_hz"] = default_delta
+        st.session_state["pg_prev_preset"] = preset_name
+
+    max_delta = max(10.0, float(f_center) - 10.0)  # f_center - Δf が 0 Hz 以下にならないように
+    delta = st.number_input(
+        "偏移 Δf (Hz)",
+        min_value=10.0,
+        max_value=float(max_delta),
+        value=float(st.session_state["delta_hz"]),
+        step=10.0,
+        key="delta_hz",
+    )
+
+    st.caption(
+        f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{float(delta):.0f} Hz**"
+        f"（プリセット既定：±{default_delta:.0f} Hz）"
+    )
 
     ear = st.radio("出力", ["両耳", "左耳のみ", "右耳のみ"], index=0)
-
-    sequence_mode = st.selectbox(
-        "系列（DOWNが1回目か2回目か）",
-        options=SEQUENCE_OPTIONS,
-        index=0,
-    )
-    if sequence_mode != "完全アトランダム":
-        st.caption("※系列1〜3は 1–50 trial の固定系列（51以降は先頭から繰り返し）")
 
     st.divider()
     st.subheader("刺激")
@@ -456,7 +445,6 @@ def snapshot_settings() -> Dict[str, Any]:
         "f_center": float(f_center),
         "delta": float(delta),
         "ear": str(ear),
-        "sequence_mode": str(sequence_mode),
         "sr": int(sr),
         "steady_ms": int(steady_ms),
         "isi_ms": int(isi_ms),
@@ -546,12 +534,6 @@ def make_new_trial(mode: str):
         ensure_staircase()
         D_ms = int(round(float(st.session_state["staircase"].x_ms)))
 
-    # DOWN interval position (1/2): use fixed series or full random
-    trial_no_in_block = (st.session_state.get("practice_n_done", 0) + 1) if mode == "practice" else (st.session_state.get("test_trial_n", 0) + 1)
-    seq_mode = str(settings.get("sequence_mode", "系列1"))
-    down_interval = get_down_interval(seq_mode, int(trial_no_in_block))
-    seq_pos = get_sequence_position(seq_mode, int(trial_no_in_block))
-
     wav, correct_interval, order = generate_trial_wav(
         sr=int(settings["sr"]),
         f_center=float(settings["f_center"]),
@@ -562,7 +544,7 @@ def make_new_trial(mode: str):
         ear=str(settings["ear"]),
         ramp_ms=int(settings["ramp_ms"]),
         target_rms=float(settings["target_rms"]),
-        down_interval=down_interval,
+        down_interval=None,
     )
 
     st.session_state["trial"] = {
@@ -570,8 +552,6 @@ def make_new_trial(mode: str):
         "D_ms": int(D_ms),
         "correct_interval": int(correct_interval),
         "order": order,
-        "sequence_pos": seq_pos,  # 1–50 (or None for random)
-        "trial_no_in_block": int(trial_no_in_block),
         **settings,
         "created_at": time.time(),
     }
@@ -599,8 +579,6 @@ def record_response(subject_id: str, response_interval: int):
         "response": int(response_interval),
         "is_correct": is_correct,
         "order": trial.get("order"),
-        "sequence_mode": trial.get("sequence_mode"),
-        "sequence_pos": trial.get("sequence_pos"),
         "preset": trial.get("preset_name"),
         "f_center": trial.get("f_center"),
         "delta": trial.get("delta"),
@@ -866,11 +844,6 @@ else:  # 結果サマリー
 
         st.markdown("#### 条件（本番）")
         st.write(f"- プリセット: **{ts['preset_name']}**  / f_center={float(ts['f_center']):.0f} Hz / Δf=±{float(ts['delta']):.0f} Hz")
-        seq_mode = ts.get("sequence_mode", "系列1")
-        if seq_mode != "完全アトランダム":
-            st.write(f"- 系列: **{seq_mode}**（1–50 trial を繰り返し）")
-        else:
-            st.write("- 系列: **完全アトランダム**")
         st.write(f"- 出力: {ts['ear']}  / SR={int(ts['sr'])} Hz  / 定常={int(ts['steady_ms'])} ms  / ISI={int(ts['isi_ms'])} ms")
         st.write(f"- ramp={int(ts['ramp_ms'])} ms / target_rms={float(ts['target_rms']):.2f}")
         st.write(f"- Staircase: start={float(ts['start_ms']):.0f} ms, floor={float(ts['floor_ms']):.0f} ms, ceil={float(ts['ceil_ms']):.0f} ms")
