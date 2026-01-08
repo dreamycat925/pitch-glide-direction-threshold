@@ -3,42 +3,44 @@ import random
 import time
 import wave
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 # ============================================================
-# Pitch Glide Direction Threshold Test (PGDT)
-# - 2AFC: which interval was "DOWN" (initially descending)?
-# - 2-down 1-up staircase on glide duration (ms)
-# - Large step until N reversals, then small step
-# - Threshold = mean of last 6 reversals in small-step phase
+# Pitch Glide CHANGE Detection Threshold Test (Single-interval)
+# - Single stimulus per trial: FLAT vs GLIDE
+# - Respond: "変化あり" / "変化なし"
+# - Mix in FLAT trials to avoid expectancy and to estimate false alarms
+# - Staircase on GLIDE duration (ms), updated on GLIDE trials only
+# - 2-down 1-up (signal-only): 2 consecutive HITs -> harder (duration↓), MISS -> easier (duration↑)
+# - Big step until N reversals, then small step
+# - Threshold = median (and mean) of last 6 reversals in small-step phase
 # ============================================================
 
 # -------------------------
 # App config
 # -------------------------
 st.set_page_config(
-    page_title="Pitch Glide Direction Threshold Test",
+    page_title="Pitch Change Detection Threshold Test",
     page_icon="🎧",
     layout="centered",
 )
 
-st.title("🎧 Pitch Glide Direction Threshold Test（ピッチ・グライド方向弁別閾値）")
+st.title("🎧 Pitch Change Detection Threshold Test（ピッチ変化“検出”閾値）")
 
 st.markdown(
     """
 **目的**  
-2AFCで「どちらが *下がる音*（DOWN; 最初に下降するグライド）か」を答えてもらい、  
-**方向弁別が可能になる最小のグライド長（duration, ms）**を推定します（= 速い変化ほど難しい）。
+単発刺激で「**高さが平坦（FLAT）**」か「**高さが変化（GLIDE）**」かを答えてもらい、  
+**ピッチ変化を検出できる最小のグライド長（duration, ms）**を推定します。
 
-**近道（開始ピッチ手がかり）を避ける設計**  
-UP/DOWN の開始周波数・終了周波数を同一にするため、グライド部は **三角形（triangular）**の周波数変化にしています。  
-- UP: 最初に上昇 → 中盤でピーク → 終盤で中心周波数に戻る  
-- DOWN: 最初に下降 → 中盤でボトム → 終盤で中心周波数に戻る  
-その後に定常部（steady tone）を付加します。
+**設計の意図（患者運用を想定）**  
+- 2区間比較（ABの2AFC）を避け、**単発**で回答できる形式  
+- 「変化なし（FLAT）」を混ぜて、**“常に変化あり”と答える戦略**を防止  
+- 閾値推定（staircase）は **GLIDE試行のみ**で更新し、FLATは **false alarm** の推定に使います
 
 **注意**  
 - なるべく **有線ヘッドホン**（Bluetoothは遅延や途切れの原因になり得ます）  
@@ -48,11 +50,11 @@ UP/DOWN の開始周波数・終了周波数を同一にするため、グライ
 )
 
 # ============================================================
-# Presets
+# Presets (f_center, default delta)
 # ============================================================
 PRESETS = {
-    "1240 Hz版（F2帯寄り：900–1580 Hz）": {"f_center": 1240.0, "delta": 340.0},
-    "500 Hz版（低周波：350–650 Hz）": {"f_center": 500.0, "delta": 150.0},
+    "1240 Hz版（F2帯寄り：900–1580 Hz）": {"f_center": 1240.0, "delta_default": 340.0},
+    "500 Hz版（低周波：350–650 Hz）": {"f_center": 500.0, "delta_default": 150.0},
 }
 
 # ============================================================
@@ -83,12 +85,12 @@ def glide_stimulus_triangular(
     delta: float,
     glide_ms: int,
     steady_ms: int,
-    start_direction: str,  # "up" or "down"
+    direction: str,  # "up" or "down" (for variety; detection doesn't depend on direction)
     ramp_ms: int,
     target_rms: float,
 ) -> np.ndarray:
     """
-    One interval stimulus:
+    One-interval GLIDE stimulus:
       - triangular glide lasting glide_ms (center -> +/-delta at mid -> center)
       - followed by steady tone at f_center lasting steady_ms
     """
@@ -103,7 +105,7 @@ def glide_stimulus_triangular(
     m = 1.0 - 2.0 * np.abs((t / T) - 0.5)
     m = np.clip(m, 0.0, 1.0)
 
-    sign = 1.0 if start_direction == "up" else -1.0
+    sign = 1.0 if direction == "up" else -1.0
     f_inst = f_center + sign * delta * m  # instantaneous frequency
 
     phase = 2.0 * np.pi * np.cumsum(f_inst) / float(sr)
@@ -125,6 +127,27 @@ def glide_stimulus_triangular(
     if peak > 0.99:
         x *= 0.99 / peak
 
+    return x
+
+
+def flat_stimulus(
+    *,
+    sr: int,
+    f_center: float,
+    total_ms: int,
+    ramp_ms: int,
+    target_rms: float,
+) -> np.ndarray:
+    """One-interval FLAT stimulus: steady tone only (same total duration as GLIDE interval)."""
+    total_ms = int(total_ms)
+    n = max(2, int(round(sr * total_ms / 1000)))
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    x = np.sin(2.0 * np.pi * f_center * t).astype(np.float32)
+    x *= _cosine_ramp_env(len(x), sr, ramp_ms)
+    x = rms_normalize(x, target_rms=target_rms)
+    peak = float(np.max(np.abs(x)))
+    if peak > 0.99:
+        x *= 0.99 / peak
     return x
 
 
@@ -155,63 +178,47 @@ def mono_to_stereo_bytes(x_mono: np.ndarray, sr: int, ear: str) -> bytes:
     return buf.getvalue()
 
 
-def silence(sr: int, dur_ms: int) -> np.ndarray:
-    n = max(1, int(round(sr * dur_ms / 1000)))
-    return np.zeros(n, dtype=np.float32)
-
-
-def generate_trial_wav(
+def generate_trial_wav_single(
     *,
     sr: int,
     f_center: float,
     delta: float,
     glide_ms: int,
     steady_ms: int,
-    isi_ms: int,
     ear: str,
     ramp_ms: int,
     target_rms: float,
-    down_interval: Optional[int] = None,  # 1/2 or None=random
-) -> Tuple[bytes, int, str]:
+    trial_type: str,  # "glide" or "flat"
+    direction: str,   # "up" or "down" (used only if trial_type="glide")
+) -> Tuple[bytes, int]:
     """
-    Returns wav_bytes, correct_interval(=DOWN position), order_label ("DOWN-UP" or "UP-DOWN")
+    Returns wav_bytes, total_ms (interval duration).
     """
-    correct_interval = down_interval if down_interval in (1, 2) else random.choice([1, 2])
-
-    stim_down = glide_stimulus_triangular(
-        sr=sr,
-        f_center=f_center,
-        delta=delta,
-        glide_ms=glide_ms,
-        steady_ms=steady_ms,
-        start_direction="down",
-        ramp_ms=ramp_ms,
-        target_rms=target_rms,
-    )
-    stim_up = glide_stimulus_triangular(
-        sr=sr,
-        f_center=f_center,
-        delta=delta,
-        glide_ms=glide_ms,
-        steady_ms=steady_ms,
-        start_direction="up",
-        ramp_ms=ramp_ms,
-        target_rms=target_rms,
-    )
-    gap = silence(sr, isi_ms)
-
-    if correct_interval == 1:
-        x = np.concatenate([stim_down, gap, stim_up])
-        order = "DOWN-UP"
+    total_ms = int(glide_ms) + int(steady_ms)
+    if trial_type == "glide":
+        x = glide_stimulus_triangular(
+            sr=sr,
+            f_center=f_center,
+            delta=delta,
+            glide_ms=glide_ms,
+            steady_ms=steady_ms,
+            direction=direction,
+            ramp_ms=ramp_ms,
+            target_rms=target_rms,
+        )
     else:
-        x = np.concatenate([stim_up, gap, stim_down])
-        order = "UP-DOWN"
-
-    return mono_to_stereo_bytes(x, sr, ear), int(correct_interval), order
+        x = flat_stimulus(
+            sr=sr,
+            f_center=f_center,
+            total_ms=total_ms,
+            ramp_ms=ramp_ms,
+            target_rms=target_rms,
+        )
+    return mono_to_stereo_bytes(x, sr, ear), total_ms
 
 
 # ============================================================
-# Staircase
+# Staircase (duration ms) — updates on GLIDE trials only
 # ============================================================
 @dataclass
 class DurationStaircase:
@@ -224,10 +231,10 @@ class DurationStaircase:
 
     # internal
     x_ms: float = field(init=False)
-    trial_index: int = 0
+    trial_index_updates: int = 0  # counts only GLIDE updates
     n_correct_streak: int = 0
     last_direction: Optional[str] = None  # "up" / "down"
-    reversals: list[Dict[str, Any]] = field(default_factory=list)
+    reversals: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
         self.x_ms = float(self.start_ms)
@@ -238,18 +245,19 @@ class DurationStaircase:
     def phase(self) -> str:
         return "small" if len(self.reversals) >= self.switch_after_reversals else "big"
 
-    def update(self, correct: bool) -> Dict[str, Any]:
+    def update_on_glide(self, hit: bool) -> Dict[str, Any]:
         """
-        2-down 1-up:
-          - 2 consecutive correct -> decrease duration (harder)
-          - 1 incorrect -> increase duration (easier)
+        2-down 1-up (signal-only):
+          - 2 consecutive HITs -> decrease duration (harder)
+          - 1 MISS -> increase duration (easier)
+        NOTE: called only on GLIDE trials.
         """
-        self.trial_index += 1
+        self.trial_index_updates += 1
         prev_x = float(self.x_ms)
         step = float(self.current_step())
 
         direction: Optional[str] = None
-        if correct:
+        if hit:
             self.n_correct_streak += 1
             if self.n_correct_streak >= 2:
                 direction = "down"  # duration decreases
@@ -267,7 +275,7 @@ class DurationStaircase:
             reversal_level = prev_x
             self.reversals.append(
                 {
-                    "trial": int(self.trial_index),
+                    "update_index": int(self.trial_index_updates),
                     "level_ms": float(reversal_level),
                     "phase": self.phase(),
                     "step_ms": float(step),
@@ -286,46 +294,25 @@ class DurationStaircase:
             "reversal": reversal,
             "reversal_level_ms": reversal_level,
             "n_reversals": len(self.reversals),
+            "n_updates": int(self.trial_index_updates),
         }
 
-    def threshold_ms(self, last_n: int = 6) -> Optional[float]:
-        """
-        threshold = mean of last_n reversal levels in the small-step phase
-        (i.e., excluding the first `switch_after_reversals` reversals).
-        """
-        if len(self.reversals) < self.switch_after_reversals + last_n:
+    def usable_reversal_levels(self) -> List[float]:
+        if len(self.reversals) <= self.switch_after_reversals:
+            return []
+        return [float(r["level_ms"]) for r in self.reversals[self.switch_after_reversals :]]
+
+    def threshold_last6_mean(self) -> Optional[float]:
+        usable = self.usable_reversal_levels()
+        if len(usable) < 6:
             return None
-        usable = self.reversals[self.switch_after_reversals :]
-        last = usable[-last_n:]
-        return float(np.mean([r["level_ms"] for r in last]))
+        return float(np.mean(usable[-6:]))
 
-    def n_small_reversals(self) -> int:
-        return max(0, len(self.reversals) - self.switch_after_reversals)
-
-
-# ============================================================
-# Derived helpers
-# ============================================================
-def sweep_rate_hz_per_s(delta_hz: float, glide_ms: float) -> float:
-    """
-    For triangular glide:
-      delta reached at mid-glide (glide_ms/2), so slope magnitude = delta / (glide_ms/2 sec)
-      = 2000 * delta / glide_ms  [Hz/s]
-    """
-    glide_ms = float(glide_ms)
-    if glide_ms <= 0:
-        return float("nan")
-    return 2000.0 * float(delta_hz) / glide_ms
-
-
-def format_threshold(th_ms: Optional[float], floor: float, ceil: float) -> str:
-    if th_ms is None:
-        return "—"
-    if th_ms <= floor + 1e-9:
-        return f"≤ {floor:.0f} ms"
-    if th_ms >= ceil - 1e-9:
-        return f"≥ {ceil:.0f} ms"
-    return f"{th_ms:.1f} ms"
+    def threshold_last6_median(self) -> Optional[float]:
+        usable = self.usable_reversal_levels()
+        if len(usable) < 6:
+            return None
+        return float(np.median(usable[-6:]))
 
 
 # ============================================================
@@ -334,22 +321,25 @@ def format_threshold(th_ms: Optional[float], floor: float, ceil: float) -> str:
 def init_state():
     defaults = {
         "mode": "idle",  # idle | practice | test | finished
-        "practice_n_done": 0,
+        "practice_streak": 0,
         "practice_log": [],
         "test_log": [],
-        "trial": None,  # current trial dict
+        "trial": None,
         "awaiting_answer": False,
         "staircase": None,
         "test_trial_n": 0,
-        "max_trials_allowed": 100,
-        "threshold_live_ms": None,
-        "threshold_final_ms": None,
-        "finished_reason": None,  # "threshold" | "max_trials" | "manual"
+        "threshold_live_mean": None,
+        "threshold_live_median": None,
+        "threshold_final_mean": None,
+        "threshold_final_median": None,
         "started_at": None,
-        # lock settings at block start (to prevent mid-run sidebar edits)
-        "practice_settings": None,
+        "finished_at": None,
         "test_settings": None,
-        "results_tab": "本番タブ",
+        "practice_settings": None,
+        "schedule": None,
+        "schedule_seed": None,
+        "results_view": "本番ログ",
+        "last_feedback": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -375,40 +365,34 @@ with st.sidebar:
 
     preset_name = st.radio("周波数帯（プリセット）", list(PRESETS.keys()), index=0)
     f_center = float(PRESETS[preset_name]["f_center"])
-    default_delta = float(PRESETS[preset_name]["delta"])
+    preset_delta_default = float(PRESETS[preset_name]["delta_default"])
 
-    # Δf（delta）を手動で調整できるようにする（既定値はプリセット）
-    # ※プリセット変更時はΔfを既定値へ戻す
-    if "pg_prev_preset" not in st.session_state:
-        st.session_state["pg_prev_preset"] = preset_name
-    if "delta_hz" not in st.session_state:
-        st.session_state["delta_hz"] = default_delta
-    if st.session_state["pg_prev_preset"] != preset_name:
-        st.session_state["delta_hz"] = default_delta
-        st.session_state["pg_prev_preset"] = preset_name
+    # Delta is user-adjustable; default = preset default (340 for 1240 preset)
+    if "pg_prev_preset_cd" not in st.session_state:
+        st.session_state["pg_prev_preset_cd"] = preset_name
+    if "delta_hz_cd" not in st.session_state:
+        st.session_state["delta_hz_cd"] = preset_delta_default
+    if st.session_state["pg_prev_preset_cd"] != preset_name:
+        st.session_state["delta_hz_cd"] = preset_delta_default
+        st.session_state["pg_prev_preset_cd"] = preset_name
 
-    max_delta = max(10.0, float(f_center) - 10.0)  # f_center - Δf が 0 Hz 以下にならないように
+    max_delta = max(10.0, float(f_center) - 10.0)
     delta = st.number_input(
         "偏移 Δf (Hz)",
         min_value=10.0,
         max_value=float(max_delta),
-        value=float(st.session_state["delta_hz"]),
+        value=float(st.session_state["delta_hz_cd"]),
         step=10.0,
-        key="delta_hz",
+        key="delta_hz_cd",
     )
-
-    st.caption(
-        f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{float(delta):.0f} Hz**"
-        f"（プリセット既定：±{default_delta:.0f} Hz）"
-    )
+    st.caption(f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{float(delta):.0f} Hz**（既定：±{preset_delta_default:.0f} Hz）")
 
     ear = st.radio("出力", ["両耳", "左耳のみ", "右耳のみ"], index=0)
 
     st.divider()
     st.subheader("刺激")
     sr = st.selectbox("サンプリング周波数", options=[44100, 48000], index=0)
-    steady_ms = st.number_input("定常部 (ms)", min_value=50, max_value=500, value=200, step=10)
-    isi_ms = st.number_input("A-B間ISI (ms)", min_value=200, max_value=1500, value=800, step=50)
+    steady_ms = st.number_input("定常部 (ms)", min_value=0, max_value=1000, value=200, step=10)
     ramp_ms = st.number_input("ramp (ms)", min_value=0, max_value=30, value=10, step=1)
     target_rms = st.number_input(
         "RMS正規化 target",
@@ -420,17 +404,24 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("Staircase（duration ms）")
+    st.subheader("本番設計（単発検出）")
+    n_trials = st.number_input("本番 trial数（最大100）", min_value=10, max_value=100, value=50, step=5)
+    flat_ratio = st.slider("FLATの割合（%）", min_value=0, max_value=60, value=20, step=5)
+    st.caption("FLATを混ぜることで“常に変化あり”戦略を防ぎ、false alarm率も推定できます。")
+
+    st.divider()
+    st.subheader("Staircase（GLIDE duration ms）")
     start_ms = st.number_input("開始 D (ms)", min_value=20, max_value=800, value=300, step=10)
     floor_ms = st.number_input("D_min (ms)", min_value=5, max_value=200, value=20, step=5)
-    ceil_ms = st.number_input("D_max (ms)", min_value=100, max_value=2000, value=500, step=50)
+    ceil_ms = st.number_input("D_max (ms)", min_value=50, max_value=2000, value=600, step=50)
 
     step_big_ms = st.number_input("大ステップ (ms)", min_value=5, max_value=200, value=40, step=5)
     step_small_ms = st.number_input("小ステップ (ms)", min_value=1, max_value=100, value=20, step=1)
     switch_after = st.number_input("大→小 切替reversal数", min_value=1, max_value=10, value=4, step=1)
 
-    max_trials = st.number_input("最大trial（上限=100）", min_value=20, max_value=100, value=100, step=5)
-    practice_n = st.number_input("練習trial数", min_value=0, max_value=30, value=10, step=1)
+    st.divider()
+    st.subheader("練習（任意）")
+    practice_must = st.checkbox("練習で5連続正答を目標（推奨）", value=True)
 
     st.divider()
     if st.button("🧹 全リセット"):
@@ -439,7 +430,6 @@ with st.sidebar:
 
 
 def snapshot_settings() -> Dict[str, Any]:
-    """Freeze current sidebar parameters for a block (practice/test)."""
     return {
         "preset_name": preset_name,
         "f_center": float(f_center),
@@ -447,45 +437,51 @@ def snapshot_settings() -> Dict[str, Any]:
         "ear": str(ear),
         "sr": int(sr),
         "steady_ms": int(steady_ms),
-        "isi_ms": int(isi_ms),
         "ramp_ms": int(ramp_ms),
         "target_rms": float(target_rms),
+        "n_trials": int(n_trials),
+        "flat_ratio": int(flat_ratio),
         "start_ms": float(start_ms),
         "floor_ms": float(floor_ms),
         "ceil_ms": float(ceil_ms),
         "step_big_ms": float(step_big_ms),
         "step_small_ms": float(step_small_ms),
         "switch_after": int(switch_after),
-        "max_trials": int(max_trials),
-        "practice_n": int(practice_n),
+        "practice_must": bool(practice_must),
     }
 
 
-def ensure_staircase():
-    if st.session_state["staircase"] is None:
-        s = st.session_state.get("test_settings") or snapshot_settings()
-        st.session_state["staircase"] = DurationStaircase(
-            start_ms=float(s["start_ms"]),
-            floor_ms=float(s["floor_ms"]),
-            ceil_ms=float(s["ceil_ms"]),
-            step_big_ms=float(s["step_big_ms"]),
-            step_small_ms=float(s["step_small_ms"]),
-            switch_after_reversals=int(s["switch_after"]),
-        )
+def build_schedule(n_trials: int, flat_ratio_pct: int, seed: Optional[int] = None) -> Tuple[List[str], int]:
+    """
+    Build a fixed schedule at test start:
+      - exact number of FLAT trials (rounded)
+      - remaining are GLIDE trials
+      - shuffled with seed and then frozen
+    """
+    n_flat = int(round(n_trials * flat_ratio_pct / 100.0))
+    n_flat = max(0, min(n_flat, n_trials))
+    n_glide = n_trials - n_flat
+    schedule = (["flat"] * n_flat) + (["glide"] * n_glide)
+
+    if seed is None:
+        seed = int(time.time() * 1000) % (2**31 - 1)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(schedule)
+    return schedule, int(seed)
 
 
+# ============================================================
+# Trial creation and response handling
+# ============================================================
 def start_practice():
     st.session_state["mode"] = "practice"
-    st.session_state["practice_n_done"] = 0
+    st.session_state["practice_streak"] = 0
     st.session_state["practice_log"] = []
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
-    st.session_state["finished_reason"] = None
-    st.session_state["threshold_live_ms"] = None
-    st.session_state["threshold_final_ms"] = None
-    st.session_state["started_at"] = time.time()
+    st.session_state["last_feedback"] = None
     st.session_state["practice_settings"] = snapshot_settings()
-    st.session_state["results_tab"] = "練習タブ"
+    st.session_state["results_view"] = "練習ログ"
 
 
 def start_test():
@@ -493,15 +489,13 @@ def start_test():
     st.session_state["test_log"] = []
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
-    st.session_state["threshold_live_ms"] = None
-    st.session_state["threshold_final_ms"] = None
-    st.session_state["finished_reason"] = None
+    st.session_state["last_feedback"] = None
     st.session_state["started_at"] = time.time()
+    st.session_state["finished_at"] = None
     st.session_state["test_settings"] = snapshot_settings()
-    st.session_state["results_tab"] = "本番タブ"
+    st.session_state["test_trial_n"] = 0
 
     s = st.session_state["test_settings"]
-    st.session_state["max_trials_allowed"] = int(s["max_trials"])
     st.session_state["staircase"] = DurationStaircase(
         start_ms=float(s["start_ms"]),
         floor_ms=float(s["floor_ms"]),
@@ -510,164 +504,180 @@ def start_test():
         step_small_ms=float(s["step_small_ms"]),
         switch_after_reversals=int(s["switch_after"]),
     )
-    st.session_state["test_trial_n"] = 0
+    st.session_state["threshold_live_mean"] = None
+    st.session_state["threshold_live_median"] = None
+    st.session_state["threshold_final_mean"] = None
+    st.session_state["threshold_final_median"] = None
+
+    schedule, seed = build_schedule(int(s["n_trials"]), int(s["flat_ratio"]), seed=None)
+    st.session_state["schedule"] = schedule
+    st.session_state["schedule_seed"] = seed
+
+    st.session_state["results_view"] = "本番ログ"
 
 
-def finish_block(reason: str):
-    """Finish current block (practice/test) and show results."""
+def finish_test():
     st.session_state["mode"] = "finished"
-    st.session_state["finished_reason"] = reason
-    st.session_state["awaiting_answer"] = False
+    st.session_state["finished_at"] = time.time()
+    sc: DurationStaircase = st.session_state.get("staircase")
+    if sc is not None:
+        st.session_state["threshold_final_mean"] = sc.threshold_last6_mean()
+        st.session_state["threshold_final_median"] = sc.threshold_last6_median()
     st.session_state["trial"] = None
-    st.session_state["results_tab"] = "結果サマリー"
+    st.session_state["awaiting_answer"] = False
+    st.session_state["results_view"] = "結果サマリー"
 
 
 def make_new_trial(mode: str):
-    """Create and store a new trial in session_state['trial'] using locked settings."""
-    settings = st.session_state.get("practice_settings") if mode == "practice" else st.session_state.get("test_settings")
+    """
+    Create trial and store into session_state['trial'].
+    - practice: random trial type (50/50), easier duration (ceil_ms)
+    - test: follows frozen schedule, duration from staircase (glide trials)
+    """
+    settings = st.session_state["practice_settings"] if mode == "practice" else st.session_state["test_settings"]
     if not settings:
         settings = snapshot_settings()
 
     if mode == "practice":
-        D_ms = int(round(float(settings["start_ms"])))
+        trial_type = random.choice(["flat", "glide"])
+        D_ms = int(round(float(settings["ceil_ms"])))  # practice: easy-ish
     else:
-        ensure_staircase()
-        D_ms = int(round(float(st.session_state["staircase"].x_ms)))
+        idx = st.session_state["test_trial_n"]
+        trial_type = st.session_state["schedule"][idx]
+        sc: DurationStaircase = st.session_state["staircase"]
+        D_ms = int(round(float(sc.x_ms)))
 
-    wav, correct_interval, order = generate_trial_wav(
+    direction = random.choice(["up", "down"])  # variety only
+
+    wav, total_ms = generate_trial_wav_single(
         sr=int(settings["sr"]),
         f_center=float(settings["f_center"]),
         delta=float(settings["delta"]),
         glide_ms=int(D_ms),
         steady_ms=int(settings["steady_ms"]),
-        isi_ms=int(settings["isi_ms"]),
         ear=str(settings["ear"]),
         ramp_ms=int(settings["ramp_ms"]),
         target_rms=float(settings["target_rms"]),
-        down_interval=None,
+        trial_type=trial_type,
+        direction=direction,
     )
 
     st.session_state["trial"] = {
         "wav": wav,
+        "trial_type": trial_type,
+        "direction": direction if trial_type == "glide" else None,
         "D_ms": int(D_ms),
-        "correct_interval": int(correct_interval),
-        "order": order,
+        "total_ms": int(total_ms),
         **settings,
         "created_at": time.time(),
     }
     st.session_state["awaiting_answer"] = True
 
 
-def record_response(subject_id: str, response_interval: int):
+def record_response(subject_id: str, response: str):
+    """
+    response: "change" or "flat"
+    """
     mode = st.session_state["mode"]
     trial = st.session_state.get("trial") or {}
     if not trial:
         return
 
-    correct_interval = int(trial["correct_interval"])
-    is_correct = int(response_interval == correct_interval)
+    trial_type = trial["trial_type"]
+    is_signal = (trial_type == "glide")
 
-    base_row = {
+    # correctness for the detection task
+    if is_signal:
+        correct = (response == "change")  # HIT
+    else:
+        correct = (response == "flat")    # correct rejection
+
+    row = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "subject_id": subject_id,
         "mode": mode,
-        "trial_in_block": st.session_state.get("practice_n_done", 0) + 1
-        if mode == "practice"
-        else st.session_state.get("test_trial_n", 0) + 1,
+        "trial_no": None,
+        "trial_type": trial_type,
+        "direction": trial.get("direction"),
+        "response": response,
+        "correct": int(correct),
+        "is_signal": int(is_signal),
         "D_ms_presented": int(trial["D_ms"]),
-        "down_interval": correct_interval,
-        "response": int(response_interval),
-        "is_correct": is_correct,
-        "order": trial.get("order"),
+        "total_ms": int(trial["total_ms"]),
         "preset": trial.get("preset_name"),
-        "f_center": trial.get("f_center"),
-        "delta": trial.get("delta"),
-        "sr": trial.get("sr"),
-        "steady_ms": trial.get("steady_ms"),
-        "isi_ms": trial.get("isi_ms"),
-        "ramp_ms": trial.get("ramp_ms"),
-        "target_rms": trial.get("target_rms"),
+        "f_center": float(trial.get("f_center")),
+        "delta": float(trial.get("delta")),
+        "sr": int(trial.get("sr")),
+        "steady_ms": int(trial.get("steady_ms")),
+        "ramp_ms": int(trial.get("ramp_ms")),
+        "target_rms": float(trial.get("target_rms")),
     }
 
     if mode == "practice":
-        st.session_state["practice_log"].append(base_row)
-        st.session_state["practice_n_done"] += 1
-        st.session_state["awaiting_answer"] = False
-        st.session_state["trial"] = None  # hide audio to discourage replay
+        row["trial_no"] = len(st.session_state["practice_log"]) + 1
+        st.session_state["practice_log"].append(row)
 
-        # auto-finish practice when completed -> back to idle (logs remain)
-        ps = st.session_state.get("practice_settings") or snapshot_settings()
-        if st.session_state["practice_n_done"] >= int(ps["practice_n"]):
+        st.session_state["practice_streak"] = st.session_state["practice_streak"] + 1 if correct else 0
+        st.session_state["last_feedback"] = {"correct": bool(correct), "trial_type": trial_type}
+
+        st.session_state["trial"] = None
+        st.session_state["awaiting_answer"] = False
+
+        if st.session_state["practice_settings"].get("practice_must", True) and st.session_state["practice_streak"] >= 5:
             st.session_state["mode"] = "idle"
         return
 
-    # test mode: update staircase
-    ensure_staircase()
-    sc: DurationStaircase = st.session_state["staircase"]
-    upd = sc.update(bool(is_correct))
-    st.session_state["test_trial_n"] = int(sc.trial_index)
+    if mode == "test":
+        st.session_state["test_trial_n"] += 1
+        row["trial_no"] = int(st.session_state["test_trial_n"])
 
-    live = sc.threshold_ms(last_n=6)
-    st.session_state["threshold_live_ms"] = live
+        sc: DurationStaircase = st.session_state["staircase"]
 
-    row = {
-        **base_row,
-        "D_ms_next": float(upd["new_x_ms"]),
-        "direction": upd["direction"],
-        "step_used_ms": upd["step_used_ms"],
-        "phase": upd["phase"],
-        "reversal": int(bool(upd["reversal"])),
-        "reversal_level_ms": upd["reversal_level_ms"],
-        "n_reversals": int(upd["n_reversals"]),
-        "n_small_reversals": int(sc.n_small_reversals()),
-        "threshold_live_ms": live,
-    }
-    st.session_state["test_log"].append(row)
+        upd = None
+        if is_signal:
+            upd = sc.update_on_glide(hit=bool(correct))
+            st.session_state["threshold_live_mean"] = sc.threshold_last6_mean()
+            st.session_state["threshold_live_median"] = sc.threshold_last6_median()
 
-    # clear trial (hide audio to discourage replay)
-    st.session_state["awaiting_answer"] = False
-    st.session_state["trial"] = None
+        row.update(
+            {
+                "update_used": int(is_signal),
+                "D_ms_next": float(sc.x_ms),
+                "direction_update": None if upd is None else upd["direction"],
+                "step_used_ms": None if upd is None else upd["step_used_ms"],
+                "phase": None if upd is None else upd["phase"],
+                "reversal": 0 if upd is None else int(bool(upd["reversal"])),
+                "reversal_level_ms": None if upd is None else upd["reversal_level_ms"],
+                "n_reversals": int(len(sc.reversals)),
+                "n_updates_glide": int(sc.trial_index_updates),
+                "threshold_live_mean": st.session_state.get("threshold_live_mean"),
+                "threshold_live_median": st.session_state.get("threshold_live_median"),
+                "schedule_seed": st.session_state.get("schedule_seed"),
+            }
+        )
 
-    # stopping rules
-    if live is not None:
-        st.session_state["threshold_final_ms"] = live
-        finish_block("threshold")
+        st.session_state["test_log"].append(row)
+
+        st.session_state["trial"] = None
+        st.session_state["awaiting_answer"] = False
+
+        if st.session_state["test_trial_n"] >= int(st.session_state["test_settings"]["n_trials"]):
+            finish_test()
         return
-
-    if sc.trial_index >= int(st.session_state["max_trials_allowed"]):
-        finish_block("max_trials")
 
 
 # ============================================================
 # Top controls
 # ============================================================
-def _practice_target_n() -> int:
-    ps = st.session_state.get("practice_settings") or snapshot_settings()
-    return int(ps["practice_n"])
-
-
 mode = st.session_state["mode"]
-practice_target_n = _practice_target_n()
 
 c1, c2, c3 = st.columns([1, 1, 1])
 with c1:
-    st.button(
-        "🧪 練習を開始",
-        disabled=(mode in ["practice", "test"]),
-        on_click=start_practice,
-    )
+    st.button("🧪 練習を開始", disabled=(mode in ["practice", "test"]), on_click=start_practice)
 with c2:
-    st.button(
-        "🎯 本番を開始",
-        disabled=(mode in ["practice", "test"]),
-        on_click=start_test,
-    )
+    st.button("🎯 本番を開始（練習スキップ可）", disabled=(mode in ["practice", "test"]), on_click=start_test)
 with c3:
-    st.button(
-        "⏹️ 終了（結果表示）",
-        disabled=(mode not in ["practice", "test"]),
-        on_click=lambda: finish_block("manual"),
-    )
+    st.button("⏹️ 終了（結果表示）", disabled=(mode not in ["practice", "test"]), on_click=finish_test)
 
 st.divider()
 
@@ -675,183 +685,171 @@ st.divider()
 # Status metrics (always shown)
 # ============================================================
 sc: Optional[DurationStaircase] = st.session_state.get("staircase", None)
+ts = st.session_state.get("test_settings") or snapshot_settings()
 
 mcols = st.columns(6)
 mcols[0].metric("mode", st.session_state["mode"])
-mcols[1].metric("practice", f"{st.session_state['practice_n_done']}/{practice_target_n}")
-mcols[2].metric("trial", f"{st.session_state.get('test_trial_n', 0)}")
-mcols[3].metric("reversals", f"{len(sc.reversals) if sc else 0}")
-mcols[4].metric("small rev", f"{sc.n_small_reversals() if sc else 0}")
+mcols[1].metric("practice streak", f"{st.session_state.get('practice_streak', 0)}")
+mcols[2].metric("trial", f"{st.session_state.get('test_trial_n', 0)}/{int(ts['n_trials'])}")
+mcols[3].metric("updates(GLIDE)", f"{sc.trial_index_updates if sc else 0}")
+mcols[4].metric("reversals", f"{len(sc.reversals) if sc else 0}")
 
-live_ms = st.session_state.get("threshold_live_ms", None)
-ts = st.session_state.get("test_settings") or snapshot_settings()
-mcols[5].metric("暫定閾値", format_threshold(live_ms, float(ts["floor_ms"]), float(ts["ceil_ms"])))
+live_med = st.session_state.get("threshold_live_median", None)
+mcols[5].metric("暫定閾値 (median)", "—" if live_med is None else f"{live_med:.1f} ms")
 
-st.caption(f"本番の最大trial: **{int(ts['max_trials'])}**（上限=100） / 練習trial: **{practice_target_n}**")
+st.caption(f"本番FLAT割合: **{int(ts['flat_ratio'])}%** / Δf=±{float(ts['delta']):.0f} Hz / f_center={float(ts['f_center']):.0f} Hz")
 
 # ============================================================
-# Main interaction (practice/test)
+# Main interaction
 # ============================================================
 if mode == "idle":
     st.info("上のボタンから **練習** または **本番** を開始してください。設定は左のサイドバーで変更できます。")
 
-elif mode == "practice":
-    ps = st.session_state.get("practice_settings") or snapshot_settings()
-    st.subheader("🧪 練習")
-    st.caption("練習は **固定D（開始D）**で実施し、フィードバックを表示します。")
+elif mode in ["practice", "test"]:
+    label = "🧪 練習" if mode == "practice" else "🎯 本番"
+    st.subheader(label)
 
-    if st.session_state["practice_n_done"] >= int(ps["practice_n"]):
-        st.success("練習が終了しました。上のボタンから本番を開始できます。")
-
-    if not st.session_state["awaiting_answer"] and st.session_state["practice_n_done"] < int(ps["practice_n"]):
-        if st.button("▶️ 提示（練習）"):
-            make_new_trial("practice")
-            st.rerun()
-
-    trial = st.session_state.get("trial")
-    if st.session_state["awaiting_answer"] and trial:
-        st.audio(trial["wav"], format="audio/wav", autoplay=True)
-        st.markdown("**質問**：どちらが **下がる音（DOWN）** でしたか？（1回目=1 / 2回目=2）")
-
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("1"):
-                resp = 1
-                correct = int(trial["correct_interval"])
-                record_response(subject_id, resp)
-                if resp == correct:
-                    st.success("正解")
-                else:
-                    st.error(f"不正解（正解は {correct}）")
-                st.rerun()
-        with b2:
-            if st.button("2"):
-                resp = 2
-                correct = int(trial["correct_interval"])
-                record_response(subject_id, resp)
-                if resp == correct:
-                    st.success("正解")
-                else:
-                    st.error(f"不正解（正解は {correct}）")
-                st.rerun()
-
-elif mode == "test":
-    ts = st.session_state.get("test_settings") or snapshot_settings()
-    st.subheader("🎯 本番（2AFC + staircase）")
-    st.caption("本番ではフィードバックなし（結果は下のタブで常に確認できます）")
+    if st.session_state["last_feedback"] is not None and mode == "practice":
+        fb = st.session_state["last_feedback"]
+        if fb["correct"]:
+            st.success(f"✅ 正解（{fb['trial_type'].upper()}）")
+        else:
+            st.error(f"❌ 不正解（{fb['trial_type'].upper()}）")
 
     if not st.session_state["awaiting_answer"]:
-        if st.button("▶️ 提示（A→無音→B）"):
-            make_new_trial("test")
+        if st.button("▶️ 提示", key=f"present_{mode}"):
+            make_new_trial(mode)
             st.rerun()
 
     trial = st.session_state.get("trial")
     if st.session_state["awaiting_answer"] and trial:
         st.audio(trial["wav"], format="audio/wav", autoplay=True)
-        st.markdown("**質問**：どちらが **下がる音（DOWN）** でしたか？（1回目=1 / 2回目=2）")
-
+        st.markdown("**質問**：今の音は **高さが変化**しましたか？")
         a1, a2 = st.columns(2)
         with a1:
-            if st.button("1", disabled=not st.session_state["awaiting_answer"]):
-                record_response(subject_id, 1)
+            if st.button("変化あり", key=f"resp_change_{mode}"):
+                record_response(subject_id, "change")
                 st.rerun()
         with a2:
-            if st.button("2", disabled=not st.session_state["awaiting_answer"]):
-                record_response(subject_id, 2)
+            if st.button("変化なし（平坦）", key=f"resp_flat_{mode}"):
+                record_response(subject_id, "flat")
                 st.rerun()
 
+elif mode == "finished":
+    st.subheader("✅ 本番終了（結果サマリーは下）")
+
 # ============================================================
-# Results (always visible)
+# 📌 Logs / Results (always visible) — button switch
 # ============================================================
 st.divider()
 st.subheader("📌 ログ・結果（常時表示）")
 
-# タブ表示はrerunのたびに初期化されやすいので、session_stateで保持します。
-# 本番中は「本番タブ」を固定表示（ボタンを押しても戻らない）にします。
+# Lock view during test/practice
 if st.session_state["mode"] == "test":
-    st.session_state["results_tab"] = "本番タブ"
+    st.session_state["results_view"] = "本番ログ"
 elif st.session_state["mode"] == "practice":
-    st.session_state["results_tab"] = "練習タブ"
+    st.session_state["results_view"] = "練習ログ"
+elif st.session_state["mode"] == "finished":
+    if st.session_state.get("results_view") not in ["練習ログ", "本番ログ", "結果サマリー"]:
+        st.session_state["results_view"] = "結果サマリー"
 
-active_results_tab = st.radio(
-    "表示",
-    ["練習タブ", "本番タブ", "結果サマリー"],
-    key="results_tab",
-    horizontal=True,
-    label_visibility="collapsed",
-)
+bcols = st.columns(3)
+with bcols[0]:
+    if st.button("練習ログ", disabled=(st.session_state["mode"] == "test")):
+        st.session_state["results_view"] = "練習ログ"
+with bcols[1]:
+    if st.button("本番ログ"):
+        st.session_state["results_view"] = "本番ログ"
+with bcols[2]:
+    if st.button("結果サマリー", disabled=(st.session_state["mode"] != "finished")):
+        st.session_state["results_view"] = "結果サマリー"
 
-if active_results_tab == "練習タブ":
-    if st.session_state.get("practice_log"):
-        df_pr = pd.DataFrame(st.session_state["practice_log"])
-        acc = float(df_pr["is_correct"].mean()) * 100.0 if len(df_pr) else float("nan")
-        st.write(f"正答率（練習）: **{acc:.1f}%**  （n={len(df_pr)}）")
-        st.dataframe(df_pr, use_container_width=True, height=360)
-        st.download_button(
-            "CSVダウンロード（練習）",
-            data=df_pr.to_csv(index=False).encode("utf-8-sig"),
-            file_name="pitch_glide_direction_threshold_log_practice.csv",
-            mime="text/csv",
-        )
-    else:
+view = st.session_state["results_view"]
+st.write(f"表示：**{view}**")
+
+def _rate(x: int, n: int) -> str:
+    if n <= 0:
+        return "—"
+    return f"{(x/n)*100:.1f}%"
+
+if view == "練習ログ":
+    if len(st.session_state["practice_log"]) == 0:
         st.caption("練習ログはまだありません。")
-
-elif active_results_tab == "本番タブ":
-    if st.session_state.get("test_log"):
-        df_test = pd.DataFrame(st.session_state["test_log"])
-        st.dataframe(df_test, use_container_width=True, height=360)
+    else:
+        dfp = pd.DataFrame(st.session_state["practice_log"])
+        st.dataframe(dfp, use_container_width=True, height=360)
         st.download_button(
-            "CSVダウンロード（本番）",
-            data=df_test.to_csv(index=False).encode("utf-8-sig"),
-            file_name="pitch_glide_direction_threshold_log_test.csv",
+            "⬇️ 練習ログCSVをダウンロード",
+            data=dfp.to_csv(index=False).encode("utf-8-sig"),
+            file_name="pitch_change_detection_practice_log.csv",
             mime="text/csv",
         )
-    else:
+
+elif view == "本番ログ":
+    if len(st.session_state["test_log"]) == 0:
         st.caption("本番ログはまだありません。")
+    else:
+        dft = pd.DataFrame(st.session_state["test_log"])
+        st.dataframe(dft, use_container_width=True, height=360)
+        st.download_button(
+            "⬇️ 本番ログCSVをダウンロード",
+            data=dft.to_csv(index=False).encode("utf-8-sig"),
+            file_name="pitch_change_detection_test_log.csv",
+            mime="text/csv",
+        )
 
-else:  # 結果サマリー
-    ts = st.session_state.get("test_settings")
-    reason = st.session_state.get("finished_reason")
-    final_ms = st.session_state.get("threshold_final_ms", None)
-    live_ms = st.session_state.get("threshold_live_ms", None)
-
-    # 本番が「終了」しているときのみまとめを出す
-    if not ts or reason is None or not st.session_state.get("test_log"):
+else:
+    if st.session_state["mode"] != "finished" or len(st.session_state["test_log"]) == 0:
         st.caption("本番を実施して終了すると、ここに結果サマリーが表示されます。")
     else:
-        ts = ts or snapshot_settings()
-        df_test = pd.DataFrame(st.session_state["test_log"])
-        n_trials = len(df_test)
+        dft = pd.DataFrame(st.session_state["test_log"])
+        sc: DurationStaircase = st.session_state.get("staircase")
+        thr_med = st.session_state.get("threshold_final_median")
+        thr_mean = st.session_state.get("threshold_final_mean")
 
-        sc = st.session_state.get("staircase")
-        n_rev = len(sc.reversals) if sc is not None and getattr(sc, "reversals", None) else 0
-        n_small_rev = sc.n_small_reversals() if sc is not None else 0
+        n_total = len(dft)
+        n_signal = int(dft["is_signal"].sum())
+        n_noise = n_total - n_signal
 
-        # --- outcome ---
-        if reason == "threshold" and final_ms is not None:
-            st.success(f"収束：推定閾値（duration） = {format_threshold(final_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
-            rate = sweep_rate_hz_per_s(float(ts["delta"]), float(final_ms))
-            st.write(f"- 等価sweep rate（三角形グライド片側）: **{rate:.0f} Hz/s**")
-            st.caption("※三角形グライドでは、最大偏移Δfに到達するのが D/2 なので rate=2000×Δf/D で換算しています。")
-        elif reason == "max_trials":
-            st.warning(f"最大trial（{int(ts['max_trials'])}）まで到達（未収束の可能性）")
-            if live_ms is not None:
-                st.write(f"- 暫定閾値: {format_threshold(live_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
-        elif reason == "manual":
-            st.info("手動終了（未収束の可能性）")
-            if live_ms is not None:
-                st.write(f"- 暫定閾値: {format_threshold(live_ms, float(ts['floor_ms']), float(ts['ceil_ms']))}")
+        hits = int(((dft["trial_type"] == "glide") & (dft["response"] == "change")).sum())
+        misses = int(((dft["trial_type"] == "glide") & (dft["response"] == "flat")).sum())
+        fas = int(((dft["trial_type"] == "flat") & (dft["response"] == "change")).sum())
+        crs = int(((dft["trial_type"] == "flat") & (dft["response"] == "flat")).sum())
 
-        st.markdown("#### 条件（本番）")
-        st.write(f"- プリセット: **{ts['preset_name']}**  / f_center={float(ts['f_center']):.0f} Hz / Δf=±{float(ts['delta']):.0f} Hz")
-        st.write(f"- 出力: {ts['ear']}  / SR={int(ts['sr'])} Hz  / 定常={int(ts['steady_ms'])} ms  / ISI={int(ts['isi_ms'])} ms")
-        st.write(f"- ramp={int(ts['ramp_ms'])} ms / target_rms={float(ts['target_rms']):.2f}")
-        st.write(f"- Staircase: start={float(ts['start_ms']):.0f} ms, floor={float(ts['floor_ms']):.0f} ms, ceil={float(ts['ceil_ms']):.0f} ms")
-        st.write(f"- step_big={float(ts['step_big_ms']):.0f} ms（rev {int(ts['switch_after'])}回まで）, step_small={float(ts['step_small_ms']):.0f} ms")
+        acc = float(dft["correct"].mean()) * 100.0 if n_total else float("nan")
 
-        st.markdown("#### 実施状況")
-        st.write(f"- trial数: **{n_trials}** / reversals: **{n_rev}** / small-step reversals: **{n_small_rev}**")
+        st.markdown("### ✅ 結果サマリー（本番）")
 
-        if sc is not None and getattr(sc, "reversals", None):
-            with st.expander("reversals（本番）", expanded=False):
-                st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True, height=260)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("trial数", f"{n_total}")
+        m2.metric("正答率", f"{acc:.1f}%")
+        m3.metric("HIT率（GLIDE）", _rate(hits, n_signal))
+        m4.metric("FA率（FLAT）", _rate(fas, n_noise))
+
+        st.markdown("#### 閾値（GLIDE duration）")
+        if thr_med is None and thr_mean is None:
+            st.warning("reversal数が不足しているため、閾値を算出できません（小ステップ期で6 reversalsが必要）。")
+        else:
+            st.write(f"- **閾値（中央値）**: **{thr_med:.1f} ms**" if thr_med is not None else "- 閾値（中央値）: —")
+            st.write(f"- 閾値（平均）: {thr_mean:.1f} ms" if thr_mean is not None else "- 閾値（平均）: —")
+
+            usable = sc.usable_reversal_levels() if sc is not None else []
+            if len(usable) >= 6:
+                last6 = usable[-6:]
+                st.caption(f"小ステップ期・最後6 reversals: {', '.join([f'{x:.1f}' for x in last6])}")
+
+        st.markdown("#### 反応内訳")
+        cA, cB, cC, cD = st.columns(4)
+        cA.metric("HIT", str(hits))
+        cB.metric("MISS", str(misses))
+        cC.metric("FA", str(fas))
+        cD.metric("CR", str(crs))
+
+        st.markdown("#### 実施条件（スナップショット）")
+        st.json(st.session_state.get("test_settings", {}))
+
+        st.markdown("#### reversals（GLIDE更新に基づく）")
+        if sc is not None and len(sc.reversals) > 0:
+            st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True, height=260)
+        else:
+            st.write("reversalなし")
