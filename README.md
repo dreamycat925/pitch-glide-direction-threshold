@@ -30,12 +30,14 @@ Try the app here (if deployed):
   - **500 Hz preset (low-frequency)**: `f_center=500 Hz`, `Δf=±150 Hz` (350–650 Hz)
 - **Output**: diotic (both ears), left-only, or right-only
 - **Stimulus per trial** (single interval):
-  - **GLIDE**: triangular pitch glide lasting `glide_ms`
-    - `f_center → f_center±Δf → f_center` (up/down is randomized for variety)
-    - followed by **steady** segment at `f_center` (default `steady_ms`)
+  - **GLIDE**: **monotonic linear frequency ramp** lasting `ramp_ms` into a **common steady-state** at `f_center`
+    - `up`: `(f_center − Δf) → f_center`
+    - `down`: `(f_center + Δf) → f_center`
+    - *Direction is randomized for variety (the task is detection, not direction judgment).*
+    - followed by a **steady** segment at `f_center` lasting `steady_ms`
   - **FLAT**: steady tone only with **matched total duration**
-    - total duration is matched to GLIDE: `total_ms = glide_ms + steady_ms`
-- **Cosine ramp** (default `ramp_ms`)
+    - total duration is matched to GLIDE: `total_ms = ramp_ms + steady_ms`
+- **Cosine fade-in/out** (amplitude envelope): `edge_ramp_ms`
 - **RMS normalization**: performed on the **audible waveform (actual sound segment)** for each stimulus
 - **Sampling rate**: **48,000 Hz (fixed)**
 
@@ -86,7 +88,7 @@ Notation:
 ## Adaptive threshold (staircase)
 
 ### Staircase rule (2‑down 1‑up; **GLIDE trials only**)
-The adaptive parameter is the **glide duration D (ms)**.
+The adaptive parameter is the **frequency‑ramp duration** `ramp_ms` (also shown as **D**, ms).
 
 - Staircase updates are applied **only on GLIDE trials** (signal trials).
 - **Two consecutive HITs on GLIDE** → duration decreases (harder)

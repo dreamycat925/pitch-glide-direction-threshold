@@ -111,8 +111,8 @@ PRESETS = {
 # ============================================================
 # Audio helpers
 # ============================================================
-def _cosine_ramp_env(n: int, sr: int, ramp_ms: int) -> np.ndarray:
-    ramp_n = int(round(sr * ramp_ms / 1000))
+def _cosine_ramp_env(n: int, sr: int, edge_ms: int) -> np.ndarray:
+    ramp_n = int(round(sr * edge_ms / 1000))
     ramp_n = max(0, min(ramp_n, n // 2))
     env = np.ones(n, dtype=np.float32)
     if ramp_n > 0:
@@ -130,48 +130,65 @@ def rms_normalize(x: np.ndarray, target_rms: float = 0.1) -> np.ndarray:
     return x * (float(target_rms) / rms)
 
 
-def glide_stimulus_triangular(
+def glide_stimulus_linear_ramp_to_center(
     *,
     sr: int,
     f_center: float,
     delta: float,
-    glide_ms: int,
-    steady_ms: int,
-    direction: str,  # "up" or "down" (for variety; detection doesn't depend on direction)
     ramp_ms: int,
+    steady_ms: int,
+    direction: str,  # "up" or "down" (randomized for variety; task is detection)
+    edge_ramp_ms: int,
     target_rms: float,
 ) -> np.ndarray:
     """
-    One-interval GLIDE stimulus:
-      - triangular glide lasting glide_ms (center -> +/-delta at mid -> center)
-      - followed by steady tone at f_center lasting steady_ms
+    One-interval GLIDE stimulus (monotonic linear ramp + steady):
+
+      - Linear frequency ramp lasting ramp_ms:
+          up:   (f_center - delta) -> f_center
+          down: (f_center + delta) -> f_center
+
+      - Followed by steady tone at f_center lasting steady_ms
+
+    Notes
+    -----
+    - Phase continuity is preserved by integrating instantaneous frequency for the ramp,
+      then continuing the steady segment from the ramp's end phase.
+    - This matches the "formant-ramp to a common steady-state" style used in
+      Stefanatos et al. / Wang et al. (see README for details).
+
     """
-    glide_ms = int(glide_ms)
+    ramp_ms = int(ramp_ms)
     steady_ms = int(steady_ms)
 
-    n_glide = max(2, int(round(sr * glide_ms / 1000)))
-    t = np.arange(n_glide, dtype=np.float32) / float(sr)
-    T = glide_ms / 1000.0
+    # --- Frequency ramp (linear) ---
+    n_ramp = max(2, int(round(sr * ramp_ms / 1000)))
+    if direction == "down":
+        f_start = float(f_center + delta)
+    else:
+        # default to "up"
+        f_start = float(f_center - delta)
+    f_end = float(f_center)
 
-    # triangular modulation 0 -> 1 -> 0
-    m = 1.0 - 2.0 * np.abs((t / T) - 0.5)
-    m = np.clip(m, 0.0, 1.0)
+    f_inst = np.linspace(f_start, f_end, n_ramp, endpoint=True, dtype=np.float32)
 
-    sign = 1.0 if direction == "up" else -1.0
-    f_inst = f_center + sign * delta * m  # instantaneous frequency
+    dphi = (2.0 * np.pi * f_inst / float(sr)).astype(np.float32)
+    phase = np.concatenate(([0.0], np.cumsum(dphi)[:-1])).astype(np.float32)
+    x_ramp = np.sin(phase).astype(np.float32)
 
-    phase = 2.0 * np.pi * np.cumsum(f_inst) / float(sr)
-    x_glide = np.sin(phase).astype(np.float32)
-
+    # --- Steady at f_center (continue from ramp end phase) ---
     n_steady = max(1, int(round(sr * steady_ms / 1000)))
     t2 = np.arange(n_steady, dtype=np.float32) / float(sr)
-    phase0 = float(phase[-1])
-    x_steady = np.sin(phase0 + 2.0 * np.pi * f_center * t2).astype(np.float32)
 
-    x = np.concatenate([x_glide, x_steady]).astype(np.float32)
+    phase0 = float(phase[-1] + dphi[-1])  # phase at the *next* sample after the ramp
+    x_steady = np.sin(phase0 + 2.0 * np.pi * f_end * t2).astype(np.float32)
 
-    # Apply ramp to the whole interval
-    x *= _cosine_ramp_env(len(x), sr, ramp_ms)
+    x = np.concatenate([x_ramp, x_steady]).astype(np.float32)
+
+    # Apply onset/offset cosine ramp (amplitude envelope) to the whole interval
+    x *= _cosine_ramp_env(len(x), sr, edge_ramp_ms)
+
+    # RMS normalize after applying the envelope
     x = rms_normalize(x, target_rms=target_rms)
 
     # Avoid clipping
@@ -180,14 +197,12 @@ def glide_stimulus_triangular(
         x *= 0.99 / peak
 
     return x
-
-
 def flat_stimulus(
     *,
     sr: int,
     f_center: float,
     total_ms: int,
-    ramp_ms: int,
+    edge_ramp_ms: int,
     target_rms: float,
 ) -> np.ndarray:
     """One-interval FLAT stimulus: steady tone only (same total duration as GLIDE interval)."""
@@ -195,7 +210,7 @@ def flat_stimulus(
     n = max(2, int(round(sr * total_ms / 1000)))
     t = np.arange(n, dtype=np.float32) / float(sr)
     x = np.sin(2.0 * np.pi * f_center * t).astype(np.float32)
-    x *= _cosine_ramp_env(len(x), sr, ramp_ms)
+    x *= _cosine_ramp_env(len(x), sr, edge_ramp_ms)
     x = rms_normalize(x, target_rms=target_rms)
     peak = float(np.max(np.abs(x)))
     if peak > 0.99:
@@ -235,10 +250,10 @@ def generate_trial_wav_single(
     sr: int,
     f_center: float,
     delta: float,
-    glide_ms: int,
+    ramp_ms: int,
     steady_ms: int,
     ear: str,
-    ramp_ms: int,
+    edge_ramp_ms: int,
     target_rms: float,
     trial_type: str,  # "glide" or "flat"
     direction: str,   # "up" or "down" (used only if trial_type="glide")
@@ -246,16 +261,16 @@ def generate_trial_wav_single(
     """
     Returns wav_bytes, total_ms (interval duration).
     """
-    total_ms = int(glide_ms) + int(steady_ms)
+    total_ms = int(ramp_ms) + int(steady_ms)
     if trial_type == "glide":
-        x = glide_stimulus_triangular(
+        x = glide_stimulus_linear_ramp_to_center(
             sr=sr,
             f_center=f_center,
             delta=delta,
-            glide_ms=glide_ms,
+            ramp_ms=ramp_ms,
             steady_ms=steady_ms,
             direction=direction,
-            ramp_ms=ramp_ms,
+            edge_ramp_ms=edge_ramp_ms,
             target_rms=target_rms,
         )
     else:
@@ -263,7 +278,7 @@ def generate_trial_wav_single(
             sr=sr,
             f_center=f_center,
             total_ms=total_ms,
-            ramp_ms=ramp_ms,
+            edge_ramp_ms=edge_ramp_ms,
             target_rms=target_rms,
         )
     return mono_to_stereo_bytes(x, sr, ear), total_ms
@@ -454,7 +469,8 @@ with st.sidebar:
     st.caption(f"サンプリング周波数は **{SR_FIXED} Hz 固定**です。")
     sr = SR_FIXED
     steady_ms = st.number_input("定常部 (ms)", min_value=0, max_value=1000, value=200, step=10)
-    ramp_ms = st.number_input("ramp (ms)", min_value=0, max_value=30, value=10, step=1)
+    st.caption("※ GLIDEの周波数遷移（ramp_ms）は下のStaircaseの **D**（ms）で可変です。ここでは遷移後の定常部（steady_ms）と音のフェード（edge_ramp_ms）を設定します。")
+    edge_ramp_ms = st.number_input("フェード（cosine, ms）", min_value=0, max_value=30, value=10, step=1)
     target_rms = st.number_input(
         "RMS正規化 target",
         min_value=0.01,
@@ -500,7 +516,7 @@ def snapshot_settings() -> Dict[str, Any]:
         "ear": str(ear),
         "sr": int(sr),  # fixed 48k
         "steady_ms": int(steady_ms),
-        "ramp_ms": int(ramp_ms),
+        "edge_ramp_ms": int(edge_ramp_ms),
         "target_rms": float(target_rms),
         "n_trials": int(N_TEST_TRIALS),  # fixed 100
         "order_mode": str(order_mode_select),  # selected series (frozen at test start as well)
@@ -632,10 +648,10 @@ def make_new_trial(mode: str):
         sr=int(settings["sr"]),
         f_center=float(settings["f_center"]),
         delta=float(settings["delta"]),
-        glide_ms=int(D_ms),
+        ramp_ms=int(D_ms),
         steady_ms=int(settings["steady_ms"]),
         ear=str(settings["ear"]),
-        ramp_ms=int(settings["ramp_ms"]),
+        edge_ramp_ms=int(settings["edge_ramp_ms"]),
         target_rms=float(settings["target_rms"]),
         trial_type=trial_type,
         direction=direction,
@@ -694,7 +710,7 @@ def record_response(subject_id: str, response: str):
         "delta": float(trial.get("delta")),
         "sr": int(trial.get("sr")),
         "steady_ms": int(trial.get("steady_ms")),
-        "ramp_ms": int(trial.get("ramp_ms")),
+        "edge_ramp_ms": int(trial.get("edge_ramp_ms")),
         "target_rms": float(trial.get("target_rms")),
     }
 
