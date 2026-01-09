@@ -16,7 +16,7 @@ rapid pitch transition processing relevant to **environmental sound perception /
 ## 🌐 Live Demo
 
 Try the app here (if deployed):  
-https://pitch-glide-direction-threshold-r6kpkigvvsbztrelb7fzkg.streamlit.app/
+`<PUT_YOUR_STREAMLIT_CLOUD_URL_HERE>`
 
 (If the app does not load, Streamlit Community Cloud may be sleeping; open the URL once to wake it up.)
 
@@ -73,12 +73,12 @@ Notation:
 
 ### Series 1 (default)
 ```text
-Not provided
+[2, 2, 1, 1, 2, 2, 2, 1, 2, 2, 1, 1, 2, 1, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 1, 2, 1, 1, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2, 1, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 1, 2, 1, 2, 2, 2, 1, 2, 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 1, 2, 1, 1, 2, 2, 2]
 ```
 
 ### Series 2
 ```text
-Not provided
+[2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 2, 1, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 1, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 1, 2, 1, 2, 1, 1, 2, 2, 2, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 2, 1, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2]
 ```
 
 ---
@@ -136,8 +136,8 @@ The test can stop before 100 trials if any criterion is met:
 ## Logging / Export
 - Practice and test logs are shown in the app
 - CSV download buttons:
-  - `pitch_change_detection_practice_log.csv`
-  - `pitch_change_detection_test_log.csv`
+  - `pitch_glide_practice_log.csv`
+  - `pitch_glide_test_log.csv`
 - Result summary includes:
   - threshold (ms) and last 6 reversal levels used
   - accuracy, HIT/MISS/FA/CR counts
