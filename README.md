@@ -43,6 +43,12 @@ Try the app here (if deployed):
 
 > ⚠️ Safety: start at a comfortable level. This app does **not** calibrate absolute dB SPL.
 
+### Micro-fix notes
+- `steady_ms=0` is allowed.
+  - The stimulus will **not** add an unintended “extra 1 sample” steady segment.
+- The app performs a **parameter consistency check** when starting **practice/test**.
+  - If there are blocking inconsistencies (e.g., `D_max ≤ D_min`, `start` outside `[D_min, D_max]`), the block will not start.
+
 ---
 
 ## Task (single‑interval; detection)
@@ -97,7 +103,7 @@ The adaptive parameter is the **frequency‑ramp duration** `ramp_ms` (also show
 FLAT trials are included to reduce expectancy and to estimate **false alarms**, but they do not update the staircase.
 
 ### Step sizes
-- **Big step** until **4 reversals**
+- **Big step** until **N reversals** (default: 4)
 - **Small step** after that
 
 ### Threshold definition

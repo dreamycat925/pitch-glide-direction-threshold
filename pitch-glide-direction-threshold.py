@@ -32,6 +32,10 @@ import streamlit as st
 #     * GLIDE試行のみの連続HITをカウントし、5連続HITで終了
 # - Progress display: small reversals “x/6”
 # - CSV export
+#
+# Final micro-fixes:
+# - steady_ms=0 のとき、steady部が 1サンプル勝手に付く問題を修正
+# - 開始時に設定の整合性チェック（明らかな不整合は開始できない）
 # ============================================================
 
 # -------------------------
@@ -64,6 +68,7 @@ FIXED_SERIES = {
     "系列1": SERIES_1,
     "系列2": SERIES_2,
 }
+
 
 def series_to_schedule(series_name: str) -> List[str]:
     seq = FIXED_SERIES.get(series_name, SERIES_1)
@@ -111,6 +116,7 @@ PRESETS = {
 # ============================================================
 # Audio helpers
 # ============================================================
+
 def _cosine_ramp_env(n: int, sr: int, edge_ms: int) -> np.ndarray:
     ramp_n = int(round(sr * edge_ms / 1000))
     ramp_n = max(0, min(ramp_n, n // 2))
@@ -157,6 +163,10 @@ def glide_stimulus_linear_ramp_to_center(
     - This matches the "formant-ramp to a common steady-state" style used in
       Stefanatos et al. / Wang et al. (see README for details).
 
+    Micro-fix
+    ---------
+    - steady_ms=0 のとき、以前は steady が 1サンプル付与されていました。
+      ここでは n_steady を 0 にできるようにし、total_ms と実サンプル長の整合性を保ちます。
     """
     ramp_ms = int(ramp_ms)
     steady_ms = int(steady_ms)
@@ -177,13 +187,14 @@ def glide_stimulus_linear_ramp_to_center(
     x_ramp = np.sin(phase).astype(np.float32)
 
     # --- Steady at f_center (continue from ramp end phase) ---
-    n_steady = max(1, int(round(sr * steady_ms / 1000)))
-    t2 = np.arange(n_steady, dtype=np.float32) / float(sr)
-
-    phase0 = float(phase[-1] + dphi[-1])  # phase at the *next* sample after the ramp
-    x_steady = np.sin(phase0 + 2.0 * np.pi * f_end * t2).astype(np.float32)
-
-    x = np.concatenate([x_ramp, x_steady]).astype(np.float32)
+    n_steady = max(0, int(round(sr * steady_ms / 1000)))  # allow 0
+    if n_steady > 0:
+        t2 = np.arange(n_steady, dtype=np.float32) / float(sr)
+        phase0 = float(phase[-1] + dphi[-1])  # phase at the *next* sample after the ramp
+        x_steady = np.sin(phase0 + 2.0 * np.pi * f_end * t2).astype(np.float32)
+        x = np.concatenate([x_ramp, x_steady]).astype(np.float32)
+    else:
+        x = x_ramp
 
     # Apply onset/offset cosine ramp (amplitude envelope) to the whole interval
     x *= _cosine_ramp_env(len(x), sr, edge_ramp_ms)
@@ -197,6 +208,8 @@ def glide_stimulus_linear_ramp_to_center(
         x *= 0.99 / peak
 
     return x
+
+
 def flat_stimulus(
     *,
     sr: int,
@@ -256,11 +269,9 @@ def generate_trial_wav_single(
     edge_ramp_ms: int,
     target_rms: float,
     trial_type: str,  # "glide" or "flat"
-    direction: str,   # "up" or "down" (used only if trial_type="glide")
+    direction: str,  # "up" or "down" (used only if trial_type="glide")
 ) -> Tuple[bytes, int]:
-    """
-    Returns wav_bytes, total_ms (interval duration).
-    """
+    """Returns wav_bytes, total_ms (interval duration)."""
     total_ms = int(ramp_ms) + int(steady_ms)
     if trial_type == "glide":
         x = glide_stimulus_linear_ramp_to_center(
@@ -371,7 +382,7 @@ class DurationStaircase:
     def usable_reversal_levels(self) -> List[float]:
         if len(self.reversals) <= self.switch_after_reversals:
             return []
-        return [float(r["level_ms"]) for r in self.reversals[self.switch_after_reversals :]]
+        return [float(r["level_ms"]) for r in self.reversals[self.switch_after_reversals:]]
 
     def threshold_last6_mean(self) -> Optional[float]:
         usable = self.usable_reversal_levels()
@@ -389,6 +400,7 @@ class DurationStaircase:
 # ============================================================
 # Session state
 # ============================================================
+
 def init_state():
     defaults = {
         "mode": "idle",  # idle | practice | test | finished
@@ -415,6 +427,9 @@ def init_state():
         # early stop streaks (GLIDE trials only; FLAT does not reset)
         "ceil_miss_streak": 0,
         "floor_hit_streak": 0,
+        # config validation
+        "config_errors": [],
+        "config_warnings": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -460,7 +475,9 @@ with st.sidebar:
         step=10.0,
         key="delta_hz_cd",
     )
-    st.caption(f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{float(delta):.0f} Hz**（既定：±{preset_delta_default:.0f} Hz）")
+    st.caption(
+        f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{float(delta):.0f} Hz**（既定：±{preset_delta_default:.0f} Hz）"
+    )
 
     ear = st.radio("出力", ["両耳", "左耳のみ", "右耳のみ"], index=0)
 
@@ -469,7 +486,9 @@ with st.sidebar:
     st.caption(f"サンプリング周波数は **{SR_FIXED} Hz 固定**です。")
     sr = SR_FIXED
     steady_ms = st.number_input("定常部 (ms)", min_value=0, max_value=1000, value=200, step=10)
-    st.caption("※ GLIDEの周波数遷移（ramp_ms）は下のStaircaseの **D**（ms）で可変です。ここでは遷移後の定常部（steady_ms）と音のフェード（edge_ramp_ms）を設定します。")
+    st.caption(
+        "※ GLIDEの周波数遷移（ramp_ms）は下のStaircaseの **D**（ms）で可変です。ここでは遷移後の定常部（steady_ms）と音のフェード（edge_ramp_ms）を設定します。"
+    )
     edge_ramp_ms = st.number_input("フェード（cosine, ms）", min_value=0, max_value=30, value=10, step=1)
     target_rms = st.number_input(
         "RMS正規化 target",
@@ -530,21 +549,120 @@ def snapshot_settings() -> Dict[str, Any]:
     }
 
 
+def validate_settings(s: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Parameter consistency check.
+
+    Returns
+    -------
+    errors: List[str]
+        Blocking issues (start_practice / start_test will not start)
+    warnings: List[str]
+        Non-blocking cautions
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    # --- Fixed SR / trials ---
+    if int(s.get("sr", -1)) != SR_FIXED:
+        errors.append(f"SR は {SR_FIXED} Hz 固定です（現在: {s.get('sr')}）。")
+    if int(s.get("n_trials", -1)) != N_TEST_TRIALS:
+        errors.append(f"本番 trial 数は {N_TEST_TRIALS} 固定です（現在: {s.get('n_trials')}）。")
+
+    # --- Series length sanity ---
+    if len(SERIES_1) != N_TEST_TRIALS or len(SERIES_2) != N_TEST_TRIALS:
+        errors.append("固定系列（Series 1/2）の長さが 100 trial ではありません（実装の整合性エラー）。")
+    if str(s.get("order_mode")) not in FIXED_SERIES:
+        errors.append(f"系列が不明です: {s.get('order_mode')}")
+
+    # --- Stimulus params ---
+    f0 = float(s.get("f_center", 0.0))
+    df = float(s.get("delta", 0.0))
+    if f0 <= 0:
+        errors.append("f_center は正の値にしてください。")
+    if df <= 0:
+        errors.append("Δf は正の値にしてください。")
+    if df >= f0:
+        errors.append("Δf が f_center 以上です（開始周波数が 0 以下になり得ます）。")
+
+    steady = int(s.get("steady_ms", 0))
+    edge = int(s.get("edge_ramp_ms", 0))
+    if steady < 0:
+        errors.append("steady_ms は 0 以上にしてください。")
+    if edge < 0:
+        errors.append("edge_ramp_ms は 0 以上にしてください。")
+
+    trms = float(s.get("target_rms", 0.0))
+    if trms <= 0:
+        errors.append("target_rms は 0 より大きい値にしてください。")
+
+    # --- Staircase params ---
+    floor = float(s.get("floor_ms", 0.0))
+    ceil = float(s.get("ceil_ms", 0.0))
+    start = float(s.get("start_ms", 0.0))
+    step_big = float(s.get("step_big_ms", 0.0))
+    step_small = float(s.get("step_small_ms", 0.0))
+    sw = int(s.get("switch_after", 0))
+
+    if floor <= 0:
+        errors.append("D_min は 0 より大きい値にしてください。")
+    if ceil <= floor:
+        errors.append("D_max は D_min より大きい値にしてください。")
+    if not (floor <= start <= ceil):
+        errors.append("開始 D は D_min〜D_max の範囲にしてください。")
+
+    if step_big <= 0 or step_small <= 0:
+        errors.append("ステップ幅は正の値にしてください。")
+    if sw <= 0:
+        errors.append("大→小 切替reversal数は 1 以上にしてください。")
+
+    if step_small > step_big:
+        warnings.append("小ステップが大ステップより大きいです（意図した設定か確認してください）。")
+
+    # --- Fade vs minimum total duration ---
+    total_min = int(round(floor)) + int(steady)
+    if total_min <= 0:
+        errors.append("(D_min + steady_ms) が 0 以下です。刺激長が 0 になります。")
+    if total_min > 0 and (2 * edge) > total_min:
+        warnings.append(
+            "edge_ramp_ms が刺激長に対して長すぎます。フェードは内部でクランプされ、指定どおりの長さにならない可能性があります。"
+        )
+
+    return errors, warnings
+
+
 # ============================================================
 # Trial creation and response handling
 # ============================================================
+
 def start_practice():
+    s = snapshot_settings()
+    errors, warnings = validate_settings(s)
+    st.session_state["config_errors"] = errors
+    st.session_state["config_warnings"] = warnings
+    if errors:
+        # Keep idle; user can fix settings
+        st.session_state["mode"] = "idle"
+        return
+
     st.session_state["mode"] = "practice"
     st.session_state["practice_streak"] = 0
     st.session_state["practice_log"] = []
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
     st.session_state["last_feedback"] = None
-    st.session_state["practice_settings"] = snapshot_settings()
+    st.session_state["practice_settings"] = s
     st.session_state["results_view"] = "練習ログ"
 
 
 def start_test():
+    s = snapshot_settings()
+    errors, warnings = validate_settings(s)
+    st.session_state["config_errors"] = errors
+    st.session_state["config_warnings"] = warnings
+    if errors:
+        st.session_state["mode"] = "idle"
+        return
+
     st.session_state["mode"] = "test"
     st.session_state["test_log"] = []
     st.session_state["trial"] = None
@@ -553,7 +671,7 @@ def start_test():
     st.session_state["started_at"] = time.time()
     st.session_state["finished_at"] = None
     st.session_state["finished_reason"] = None
-    st.session_state["test_settings"] = snapshot_settings()
+    st.session_state["test_settings"] = s
     st.session_state["test_trial_n"] = 0
 
     # Freeze series at test start
@@ -566,7 +684,6 @@ def start_test():
     st.session_state["ceil_miss_streak"] = 0
     st.session_state["floor_hit_streak"] = 0
 
-    s = st.session_state["test_settings"]
     st.session_state["staircase"] = DurationStaircase(
         start_ms=float(s["start_ms"]),
         floor_ms=float(s["floor_ms"]),
@@ -673,7 +790,10 @@ def make_new_trial(mode: str):
 
 
 def record_response(subject_id: str, response: str):
-    """
+    """Record response.
+
+    Parameters
+    ----------
     response: "change" or "flat"
     """
     mode = st.session_state["mode"]
@@ -822,15 +942,26 @@ with c2:
 with c3:
     st.button("⏹️ 終了", disabled=(mode not in ["practice", "test"]), on_click=stop_now)
 
+# ---- Show config validation results (from last start attempt) ----
+if st.session_state.get("config_errors"):
+    st.error("設定の整合性エラー（修正してから開始してください）\n" + "\n".join([f"- {e}" for e in st.session_state["config_errors"]]))
+if st.session_state.get("config_warnings"):
+    st.warning("設定の注意点（開始は可能）\n" + "\n".join([f"- {w}" for w in st.session_state["config_warnings"]]))
+
 st.divider()
 
 # ============================================================
 # Status metrics (always shown)
 # ============================================================
 sc: Optional[DurationStaircase] = st.session_state.get("staircase", None)
+
 ts = st.session_state.get("test_settings") or snapshot_settings()
 
-series_now = st.session_state.get("order_mode_test", "系列1") if st.session_state.get("mode") in ["test", "finished"] else str(order_mode_select)
+series_now = (
+    st.session_state.get("order_mode_test", "系列1")
+    if st.session_state.get("mode") in ["test", "finished"]
+    else str(order_mode_select)
+)
 
 # Row 1
 r1 = st.columns(4)
@@ -934,10 +1065,12 @@ with bcols[2]:
 view = st.session_state["results_view"]
 st.write(f"表示：**{view}**")
 
+
 def _rate(x: int, n: int) -> str:
     if n <= 0:
         return "—"
-    return f"{(x/n)*100:.1f}%"
+    return f"{(x / n) * 100:.1f}%"
+
 
 if view == "練習ログ":
     if len(st.session_state["practice_log"]) == 0:
