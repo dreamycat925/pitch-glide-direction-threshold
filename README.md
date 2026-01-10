@@ -13,15 +13,6 @@ rapid pitch transition processing relevant to **environmental sound perception /
 
 ---
 
-## 🌐 Live Demo
-
-Try the app here (if deployed):  
-`<PUT_YOUR_STREAMLIT_CLOUD_URL_HERE>`
-
-(If the app does not load, Streamlit Community Cloud may be sleeping; open the URL once to wake it up.)
-
----
-
 ## What this version implements
 
 ### Stimuli
@@ -35,6 +26,7 @@ Try the app here (if deployed):
     - `down`: `(f_center + Δf) → f_center`
     - *Direction is randomized for variety (the task is detection, not direction judgment).*
     - followed by a **steady** segment at `f_center` lasting `steady_ms`
+      - ✅ **steady_ms = 0 is allowed**: in this case the steady segment is **omitted** (no forced 1-sample append)
   - **FLAT**: steady tone only with **matched total duration**
     - total duration is matched to GLIDE: `total_ms = ramp_ms + steady_ms`
 - **Cosine fade-in/out** (amplitude envelope): `edge_ramp_ms`
@@ -42,12 +34,6 @@ Try the app here (if deployed):
 - **Sampling rate**: **48,000 Hz (fixed)**
 
 > ⚠️ Safety: start at a comfortable level. This app does **not** calibrate absolute dB SPL.
-
-### Micro-fix notes
-- `steady_ms=0` is allowed.
-  - The stimulus will **not** add an unintended “extra 1 sample” steady segment.
-- The app performs a **parameter consistency check** when starting **practice/test**.
-  - If there are blocking inconsistencies (e.g., `D_max ≤ D_min`, `start` outside `[D_min, D_max]`), the block will not start.
 
 ---
 
@@ -79,16 +65,6 @@ Notation:
 - `1 = FLAT`
 - `2 = GLIDE`
 
-### Series 1 (default)
-```text
-[2, 2, 1, 1, 2, 2, 2, 1, 2, 2, 1, 1, 2, 1, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 1, 2, 1, 1, 2, 2, 1, 2, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2, 1, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 1, 2, 1, 2, 2, 2, 1, 2, 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 1, 2, 1, 1, 2, 2, 2]
-```
-
-### Series 2
-```text
-[2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 2, 1, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 1, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 1, 2, 1, 2, 1, 1, 2, 2, 2, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 2, 1, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2]
-```
-
 ---
 
 ## Adaptive threshold (staircase)
@@ -103,7 +79,7 @@ The adaptive parameter is the **frequency‑ramp duration** `ramp_ms` (also show
 FLAT trials are included to reduce expectancy and to estimate **false alarms**, but they do not update the staircase.
 
 ### Step sizes
-- **Big step** until **N reversals** (default: 4)
+- **Big step** until **4 reversals**
 - **Small step** after that
 
 ### Threshold definition
@@ -132,6 +108,19 @@ The test can stop before 100 trials if any criterion is met:
 
 ---
 
+## Parameter consistency check (micro-fix)
+This version includes a simple **parameter consistency check** shown in the sidebar:
+
+- Errors (start buttons are disabled):
+  - `D_min >= D_max`
+  - `start D` not within `[D_min, D_max]`
+  - non-positive step sizes, etc.
+- Warnings:
+  - `edge_ramp_ms` is too long compared to the shortest possible stimulus (`D_min + steady_ms`)
+  - `step_small > step_big` (if unintentional)
+
+---
+
 ## Reliability / interpretation notes
 - **FA (false alarm)**: answering “変化あり” on a FLAT trial
   - Useful as an attention / response-bias quality metric
@@ -157,8 +146,6 @@ The test can stop before 100 trials if any criterion is met:
 ## Local Installation
 
 ```bash
-git clone https://github.com/<you>/<repo>.git
-cd <repo>
 pip install -r requirements.txt
 streamlit run pitch-glide-direction-threshold.py
 ```
