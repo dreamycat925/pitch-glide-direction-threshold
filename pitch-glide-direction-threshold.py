@@ -32,6 +32,10 @@ import streamlit as st
 #     * GLIDE試行のみの連続HITをカウントし、5連続HITで終了
 # - Progress display: small reversals “x/6”
 # - CSV export
+#
+# Final micro-fixes:
+# - steady_ms=0 のとき、steady部が 1サンプル勝手に付く問題を修正（n_steady を 0 許容）
+# - 開始時に設定の整合性チェック（明らかな不整合は開始できない）
 # ============================================================
 
 # -------------------------
@@ -64,6 +68,7 @@ FIXED_SERIES = {
     "系列1": SERIES_1,
     "系列2": SERIES_2,
 }
+
 
 def series_to_schedule(series_name: str) -> List[str]:
     seq = FIXED_SERIES.get(series_name, SERIES_1)
@@ -142,7 +147,7 @@ def glide_stimulus_linear_ramp_to_center(
     target_rms: float,
 ) -> np.ndarray:
     """
-    One-interval GLIDE stimulus (monotonic linear ramp + steady):
+    One-interval GLIDE stimulus (monotonic linear ramp + optional steady):
 
       - Linear frequency ramp lasting ramp_ms:
           up:   (f_center - delta) -> f_center
@@ -154,13 +159,10 @@ def glide_stimulus_linear_ramp_to_center(
     -----
     - Phase continuity is preserved by integrating instantaneous frequency for the ramp,
       then continuing the steady segment from the ramp's end phase.
-    - This matches the "formant-ramp to a common steady-state" style used in
-      Stefanatos et al. / Wang et al. (see README for details).
 
     Micro-fix
     ---------
-    - If steady_ms == 0, the steady segment is omitted (no forced 1-sample append),
-      preventing a 1-sample duration mismatch.
+    - steady_ms=0 のとき、steady が 1サンプル付与されないよう、n_steady を 0 許容にしています。
     """
     ramp_ms = int(ramp_ms)
     steady_ms = int(steady_ms)
@@ -170,7 +172,6 @@ def glide_stimulus_linear_ramp_to_center(
     if direction == "down":
         f_start = float(f_center + delta)
     else:
-        # default to "up"
         f_start = float(f_center - delta)
     f_end = float(f_center)
 
@@ -181,7 +182,7 @@ def glide_stimulus_linear_ramp_to_center(
     x_ramp = np.sin(phase).astype(np.float32)
 
     # --- Steady at f_center (continue from ramp end phase) ---
-    n_steady = int(round(sr * steady_ms / 1000))
+    n_steady = max(0, int(round(sr * steady_ms / 1000)))  # allow 0
     if n_steady > 0:
         t2 = np.arange(n_steady, dtype=np.float32) / float(sr)
         phase0 = float(phase[-1] + dphi[-1])  # phase at the *next* sample after the ramp
@@ -265,9 +266,7 @@ def generate_trial_wav_single(
     trial_type: str,  # "glide" or "flat"
     direction: str,   # "up" or "down" (used only if trial_type="glide")
 ) -> Tuple[bytes, int]:
-    """
-    Returns wav_bytes, total_ms (interval duration).
-    """
+    """Returns wav_bytes, total_ms (interval duration)."""
     total_ms = int(ramp_ms) + int(steady_ms)
     if trial_type == "glide":
         x = glide_stimulus_linear_ramp_to_center(
@@ -422,9 +421,9 @@ def init_state():
         # early stop streaks (GLIDE trials only; FLAT does not reset)
         "ceil_miss_streak": 0,
         "floor_hit_streak": 0,
-        # parameter check (microfix)
-        "param_errors": [],
-        "param_warnings": [],
+        # config validation (for start gating)
+        "config_errors": [],
+        "config_warnings": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -470,7 +469,9 @@ with st.sidebar:
         step=10.0,
         key="delta_hz_cd",
     )
-    st.caption(f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{float(delta):.0f} Hz**（既定：±{preset_delta_default:.0f} Hz）")
+    st.caption(
+        f"中心周波数 f_center = **{f_center:.0f} Hz** / 偏移 Δf = **±{float(delta):.0f} Hz**（既定：±{preset_delta_default:.0f} Hz）"
+    )
 
     ear = st.radio("出力", ["両耳", "左耳のみ", "右耳のみ"], index=0)
 
@@ -540,71 +541,96 @@ def snapshot_settings() -> Dict[str, Any]:
     }
 
 
-# ============================================================
-# Parameter consistency check (microfix)
-# ============================================================
 def validate_settings(s: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Parameter consistency check.
+
+    Returns
+    -------
+    errors: List[str]
+        Blocking issues (start_practice / start_test will not start)
+    warnings: List[str]
+        Non-blocking cautions
+    """
     errors: List[str] = []
     warnings: List[str] = []
 
-    # Staircase bounds
-    if float(s["floor_ms"]) >= float(s["ceil_ms"]):
-        errors.append("Staircase: **D_min は D_max より小さく**設定してください。")
-    if not (float(s["floor_ms"]) <= float(s["start_ms"]) <= float(s["ceil_ms"])):
-        errors.append("Staircase: **開始 D** は **D_min〜D_max** の範囲にしてください。")
+    # --- Fixed SR / trials ---
+    if int(s.get("sr", -1)) != SR_FIXED:
+        errors.append(f"SR は {SR_FIXED} Hz 固定です（現在: {s.get('sr')}）。")
+    if int(s.get("n_trials", -1)) != N_TEST_TRIALS:
+        errors.append(f"本番 trial 数は {N_TEST_TRIALS} 固定です（現在: {s.get('n_trials')}）。")
 
-    # Step sizes
-    if float(s["step_big_ms"]) <= 0 or float(s["step_small_ms"]) <= 0:
-        errors.append("Staircase: ステップ幅は **正の値**にしてください。")
-    if float(s["step_small_ms"]) > float(s["step_big_ms"]):
-        warnings.append("Staircase: **小ステップが大ステップより大きい**設定です（意図した設定か確認）。")
+    # --- Series length sanity ---
+    if len(SERIES_1) != N_TEST_TRIALS or len(SERIES_2) != N_TEST_TRIALS:
+        errors.append("固定系列（Series 1/2）の長さが 100 trial ではありません（実装の整合性エラー）。")
+    if str(s.get("order_mode")) not in FIXED_SERIES:
+        errors.append(f"系列が不明です: {s.get('order_mode')}")
 
-    # Stimulus envelope vs shortest possible duration
-    min_total_ms = float(s["floor_ms"]) + float(s["steady_ms"])
-    if min_total_ms <= 0:
-        errors.append("刺激: （D_min + steady_ms）が 0 以下です。")
-    else:
-        if 2.0 * float(s["edge_ramp_ms"]) > min_total_ms:
-            warnings.append("刺激: edge_ramp_ms が（D_min + steady_ms）の半分より長い設定です。フェードは内部でクリップされます。")
+    # --- Stimulus params ---
+    f0 = float(s.get("f_center", 0.0))
+    df = float(s.get("delta", 0.0))
+    if f0 <= 0:
+        errors.append("f_center は正の値にしてください。")
+    if df <= 0:
+        errors.append("Δf は正の値にしてください。")
+    if df >= f0:
+        errors.append("Δf が f_center 以上です（開始周波数が 0 以下になり得ます）。")
 
-    # Delta sanity (UI already constrains, but keep for safety)
-    if float(s["delta"]) <= 0:
-        errors.append("刺激: Δf は正の値にしてください。")
-    if float(s["delta"]) >= float(s["f_center"]):
-        errors.append("刺激: Δf が大きすぎます（開始周波数が 0 Hz 以下になり得ます）。")
+    steady = int(s.get("steady_ms", 0))
+    edge = int(s.get("edge_ramp_ms", 0))
+    if steady < 0:
+        errors.append("steady_ms は 0 以上にしてください。")
+    if edge < 0:
+        errors.append("edge_ramp_ms は 0 以上にしてください。")
+
+    trms = float(s.get("target_rms", 0.0))
+    if trms <= 0:
+        errors.append("target_rms は 0 より大きい値にしてください。")
+
+    # --- Staircase params ---
+    floor = float(s.get("floor_ms", 0.0))
+    ceil = float(s.get("ceil_ms", 0.0))
+    start = float(s.get("start_ms", 0.0))
+    step_big = float(s.get("step_big_ms", 0.0))
+    step_small = float(s.get("step_small_ms", 0.0))
+    sw = int(s.get("switch_after", 0))
+
+    if floor <= 0:
+        errors.append("D_min は 0 より大きい値にしてください。")
+    if ceil <= floor:
+        errors.append("D_max は D_min より大きい値にしてください。")
+    if not (floor <= start <= ceil):
+        errors.append("開始 D は D_min〜D_max の範囲にしてください。")
+
+    if step_big <= 0 or step_small <= 0:
+        errors.append("ステップ幅は正の値にしてください。")
+    if sw <= 0:
+        errors.append("大→小 切替reversal数は 1 以上にしてください。")
+
+    if step_small > step_big:
+        warnings.append("小ステップが大ステップより大きいです（意図した設定か確認してください）。")
+
+    # --- Fade vs minimum total duration ---
+    total_min = int(round(floor)) + int(steady)
+    if total_min <= 0:
+        errors.append("(D_min + steady_ms) が 0 以下です。刺激長が 0 になります。")
+    if total_min > 0 and (2 * edge) > total_min:
+        warnings.append(
+            "edge_ramp_ms が刺激長に対して長すぎます。フェードは内部でクランプされ、指定どおりの長さにならない可能性があります。"
+        )
 
     return errors, warnings
-
-
-# Compute current check and store (shown in sidebar below)
-_current_settings = snapshot_settings()
-_param_errors, _param_warnings = validate_settings(_current_settings)
-st.session_state["param_errors"] = _param_errors
-st.session_state["param_warnings"] = _param_warnings
-PARAM_OK = (len(_param_errors) == 0)
-
-# Render the check box in sidebar (after inputs are declared)
-with st.sidebar:
-    st.subheader("✅ パラメータ整合性チェック")
-    if _param_errors:
-        for e in _param_errors:
-            st.error(e)
-    if _param_warnings:
-        for w in _param_warnings:
-            st.warning(w)
-    if (not _param_errors) and (not _param_warnings):
-        st.success("OK")
 
 
 # ============================================================
 # Trial creation and response handling
 # ============================================================
 def start_practice():
-    # Validate on start (microfix)
-    errs, warns = validate_settings(snapshot_settings())
-    st.session_state["param_errors"] = errs
-    st.session_state["param_warnings"] = warns
-    if errs:
+    s = snapshot_settings()
+    errors, warnings = validate_settings(s)
+    st.session_state["config_errors"] = errors
+    st.session_state["config_warnings"] = warnings
+    if errors:
         st.session_state["mode"] = "idle"
         return
 
@@ -614,16 +640,16 @@ def start_practice():
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
     st.session_state["last_feedback"] = None
-    st.session_state["practice_settings"] = snapshot_settings()
+    st.session_state["practice_settings"] = s
     st.session_state["results_view"] = "練習ログ"
 
 
 def start_test():
-    # Validate on start (microfix)
-    errs, warns = validate_settings(snapshot_settings())
-    st.session_state["param_errors"] = errs
-    st.session_state["param_warnings"] = warns
-    if errs:
+    s = snapshot_settings()
+    errors, warnings = validate_settings(s)
+    st.session_state["config_errors"] = errors
+    st.session_state["config_warnings"] = warnings
+    if errors:
         st.session_state["mode"] = "idle"
         return
 
@@ -635,7 +661,7 @@ def start_test():
     st.session_state["started_at"] = time.time()
     st.session_state["finished_at"] = None
     st.session_state["finished_reason"] = None
-    st.session_state["test_settings"] = snapshot_settings()
+    st.session_state["test_settings"] = s
     st.session_state["test_trial_n"] = 0
 
     # Freeze series at test start
@@ -648,7 +674,6 @@ def start_test():
     st.session_state["ceil_miss_streak"] = 0
     st.session_state["floor_hit_streak"] = 0
 
-    s = st.session_state["test_settings"]
     st.session_state["staircase"] = DurationStaircase(
         start_ms=float(s["start_ms"]),
         floor_ms=float(s["floor_ms"]),
@@ -896,15 +921,25 @@ def record_response(subject_id: str, response: str):
 # ============================================================
 mode = st.session_state["mode"]
 
-# If there are current parameter errors, show a compact notice in main area.
-if st.session_state.get("param_errors"):
-    st.error("設定に整合性エラーがあります（左の「✅ パラメータ整合性チェック」を確認してください）。")
+# While idle, keep showing preflight validation results for the current sidebar settings.
+if mode == "idle":
+    errs, warns = validate_settings(snapshot_settings())
+    st.session_state["config_errors"] = errs
+    st.session_state["config_warnings"] = warns
+
+if mode == "idle":
+    errs = st.session_state.get("config_errors", [])
+    warns = st.session_state.get("config_warnings", [])
+    if errs:
+        st.error("設定に不整合があるため開始できません：\n- " + "\n- ".join(errs))
+    if warns:
+        st.warning("注意（開始はできますが推奨しません）：\n- " + "\n- ".join(warns))
 
 c1, c2, c3 = st.columns([1, 1, 1])
 with c1:
-    st.button("🧪 練習を開始", disabled=(mode in ["practice", "test"] or (not PARAM_OK)), on_click=start_practice)
+    st.button("🧪 練習を開始", disabled=(mode in ["practice", "test"] or bool(st.session_state.get("config_errors"))), on_click=start_practice)
 with c2:
-    st.button("🎯 本番を開始（練習スキップ可）", disabled=(mode in ["practice", "test"] or (not PARAM_OK)), on_click=start_test)
+    st.button("🎯 本番を開始（練習スキップ可）", disabled=(mode in ["practice", "test"] or bool(st.session_state.get("config_errors"))), on_click=start_test)
 with c3:
     st.button("⏹️ 終了", disabled=(mode not in ["practice", "test"]), on_click=stop_now)
 
@@ -1020,10 +1055,12 @@ with bcols[2]:
 view = st.session_state["results_view"]
 st.write(f"表示：**{view}**")
 
+
 def _rate(x: int, n: int) -> str:
     if n <= 0:
         return "—"
     return f"{(x/n)*100:.1f}%"
+
 
 if view == "練習ログ":
     if len(st.session_state["practice_log"]) == 0:

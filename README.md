@@ -13,6 +13,15 @@ rapid pitch transition processing relevant to **environmental sound perception /
 
 ---
 
+## 🌐 Live Demo
+
+Try the app here (if deployed):  
+`<PUT_YOUR_STREAMLIT_CLOUD_URL_HERE>`
+
+(If the app does not load, Streamlit Community Cloud may be sleeping; open the URL once to wake it up.)
+
+---
+
 ## What this version implements
 
 ### Stimuli
@@ -26,7 +35,7 @@ rapid pitch transition processing relevant to **environmental sound perception /
     - `down`: `(f_center + Δf) → f_center`
     - *Direction is randomized for variety (the task is detection, not direction judgment).*
     - followed by a **steady** segment at `f_center` lasting `steady_ms`
-      - ✅ **steady_ms = 0 is allowed**: in this case the steady segment is **omitted** (no forced 1-sample append)
+      - **Note:** `steady_ms=0` is allowed (ramp-only). The implementation does **not** add an unintended extra sample.
   - **FLAT**: steady tone only with **matched total duration**
     - total duration is matched to GLIDE: `total_ms = ramp_ms + steady_ms`
 - **Cosine fade-in/out** (amplitude envelope): `edge_ramp_ms`
@@ -108,16 +117,15 @@ The test can stop before 100 trials if any criterion is met:
 
 ---
 
-## Parameter consistency check (micro-fix)
-This version includes a simple **parameter consistency check** shown in the sidebar:
+## Parameter consistency check (start gating)
+Before starting **practice** or **test**, the app checks for obvious inconsistencies, e.g.:
 
-- Errors (start buttons are disabled):
-  - `D_min >= D_max`
-  - `start D` not within `[D_min, D_max]`
-  - non-positive step sizes, etc.
-- Warnings:
-  - `edge_ramp_ms` is too long compared to the shortest possible stimulus (`D_min + steady_ms`)
-  - `step_small > step_big` (if unintentional)
+- `Δf >= f_center` (could yield non-positive start frequency)
+- `D_max <= D_min`
+- `start D` outside `[D_min, D_max]`
+- invalid step sizes
+
+If blocking errors are present, the start buttons are disabled and an error message is shown.
 
 ---
 
@@ -146,6 +154,8 @@ This version includes a simple **parameter consistency check** shown in the side
 ## Local Installation
 
 ```bash
+git clone https://github.com/<you>/<repo>.git
+cd <repo>
 pip install -r requirements.txt
 streamlit run pitch-glide-direction-threshold.py
 ```
