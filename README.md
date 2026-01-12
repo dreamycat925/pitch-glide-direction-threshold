@@ -60,15 +60,20 @@ This avoids the cognitive load of 2‑interval comparison (2AFC) and is intended
 
 ---
 
-## Trial schedule (Series 1 / Series 2)
+## Trial schedule (Series 1 / Series 2 / Pseudo-random)
 
-To standardize sessions and support validation/retest comparisons, the main test uses **fixed schedules**:
+To standardize sessions and support validation/retest comparisons, the main test can use either **fixed schedules** (Series 1/2) or a **pseudo‑random schedule**:
 
 - Total: **100 trials**
 - **40 trials = FLAT**
 - **60 trials = GLIDE**
 - **Default**: **Series 1**
-- Option: **Series 2**
+- Options:
+  - **Series 2**
+  - **Pseudo‑random** (generated at test start)
+    - keeps 40×`1` and 60×`2`
+    - constraint: `1` or `2` will not repeat **4+** times in a row (max **3**)
+    - the generated code list (and seed) is shown in the result summary / export for reproducibility
 
 Notation:
 - `1 = FLAT`

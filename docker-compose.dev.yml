@@ -1,0 +1,12 @@
+services:
+  pitch-glide:
+    build: .
+    container_name: pitch-glide-direction-threshold-dev
+    ports:
+      - "127.0.0.1:30000:8501"
+    # Dev mode: mount local source into the container so edits reflect immediately
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Tokyo"
