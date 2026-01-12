@@ -33,7 +33,9 @@ Try the app here (if deployed):
   - **GLIDE**: **monotonic linear frequency ramp** lasting `ramp_ms` into a **common steady-state** at `f_center`
     - `up`: `(f_center − Δf) → f_center`
     - `down`: `(f_center + Δf) → f_center`
-    - *Direction is randomized for variety (the task is detection, not direction judgment).*
+    - *Direction control*
+      - **Main test**: GLIDE direction is **fixed by the selected series** (for reproducibility)
+      - **Practice**: GLIDE direction is randomized
     - followed by a **steady** segment at `f_center` lasting `steady_ms`
       - **Note:** `steady_ms=0` is allowed (ramp-only). The implementation does **not** add an unintended extra sample.
   - **FLAT**: steady tone only with **matched total duration**
@@ -62,22 +64,31 @@ This avoids the cognitive load of 2‑interval comparison (2AFC) and is intended
 
 ## Trial schedule (Series 1 / Series 2 / Pseudo-random)
 
-To standardize sessions and support validation/retest comparisons, the main test can use either **fixed schedules** (Series 1/2) or a **pseudo‑random schedule**:
+To standardize sessions and support validation/retest comparisons, the main test uses **pre-defined (or reproducible) schedules**:
 
 - Total: **100 trials**
 - **40 trials = FLAT**
 - **60 trials = GLIDE**
 - **Default**: **Series 1**
-- Options:
-  - **Series 2**
-  - **Pseudo‑random** (generated at test start)
-    - keeps 40×`1` and 60×`2`
-    - constraint: `1` or `2` will not repeat **4+** times in a row (max **3**)
-    - the generated code list (and seed) is shown in the result summary / export for reproducibility
+- Option: **Series 2**
+- Option: **Pseudo-random** (seeded; exact counts + max-run constraint)
 
 Notation:
 - `1 = FLAT`
 - `2 = GLIDE`
+
+### Pseudo-random constraints
+- Exact counts: `1×40`, `2×60`
+- Max-run: `1` or `2` will not repeat **4 times or more** (max consecutive = 3)
+- The **seed**, the generated **1/2 schedule**, and the **GLIDE-direction schedule** are shown in the result summary.
+
+### GLIDE direction schedule (test)
+- GLIDE trials are assigned a fixed direction sequence:
+  - `1 = up`, `2 = down`
+  - Length = 60 (GLIDE trials only)
+  - Balanced: `up=30`, `down=30`
+- Series 1 / Series 2 use fixed direction sequences.
+- Pseudo-random generates a seeded direction sequence (also fixed within a session).
 
 ---
 

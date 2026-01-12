@@ -45,16 +45,6 @@ SR_FIXED = 48_000
 N_TEST_TRIALS = 100
 N_SMALL_REV_TARGET = 6  # threshold needs last 6 small-phase reversals
 
-# --- Test schedule composition (fixed) ---
-# 1 = FLAT, 2 = GLIDE
-# Total is fixed to 100 trials: 40 FLAT / 60 GLIDE
-N_TEST_FLAT = 40
-N_TEST_GLIDE = 60
-
-# Pseudo-random constraint: no more than 3 consecutive 1s or 2s
-PSEUDO_MAX_CONSEC = 3  # 1/2 は 4回以上連続しない（最大3回）
-PSEUDO_MAX_TRIES = 5000
-
 # -------------------------
 # Fixed test series (1=FLAT, 2=GLIDE) — length 100
 # -------------------------
@@ -74,127 +64,160 @@ SERIES_2 = [
     2, 1, 2, 1, 2, 2, 1, 2, 1, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2,
 ]
 
-FIXED_SERIES = {
+FIXED_TRIAL_SERIES = {
     "系列1": SERIES_1,
     "系列2": SERIES_2,
 }
 
-SERIES_OPTIONS = ["系列1", "系列2", "擬似ランダム"]
+# -------------------------
+# Fixed glide-direction schedules for test (GLIDE trials only; length 60)
+# 1 = up, 2 = down  (as requested)
+# -------------------------
+GLIDE_DIR_SERIES_1_CODES = [
+    2, 1, 2, 2, 1, 2, 2, 1, 2, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1,
+    1, 2, 2, 1, 1, 1, 1, 2, 1, 1, 2, 2, 2, 1, 1, 2, 1, 2, 1, 2,
+    1, 2, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 2, 1, 2, 1, 1,
+]
+
+GLIDE_DIR_SERIES_2_CODES = [
+    1, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 1, 2, 1, 1, 2, 2, 1, 1, 2,
+    1, 2, 1, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 1, 1,
+    2, 1, 2, 1, 2, 1, 2, 2, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1, 2, 1,
+]
+
+FIXED_GLIDE_DIR_CODES = {
+    "系列1": GLIDE_DIR_SERIES_1_CODES,
+    "系列2": GLIDE_DIR_SERIES_2_CODES,
+}
 
 
-def codes_to_schedule(codes: List[int]) -> List[str]:
-    """Convert numeric series codes to internal schedule labels."""
-    return ["flat" if int(v) == 1 else "glide" for v in codes]
+def _trial_codes_to_types(seq: List[int]) -> List[str]:
+    return ["flat" if int(v) == 1 else "glide" for v in seq]
 
 
-def max_consecutive_run(codes: List[int]) -> int:
-    """Return the maximum run length of identical consecutive values in `codes`."""
-    if not codes:
-        return 0
-    max_run = 1
-    run = 1
-    last = int(codes[0])
-    for v in codes[1:]:
-        v = int(v)
-        if v == last:
-            run += 1
-            if run > max_run:
-                max_run = run
-        else:
-            last = v
-            run = 1
-    return int(max_run)
+def _dir_codes_to_labels(seq: List[int]) -> List[str]:
+    # 1=up, 2=down
+    return ["up" if int(v) == 1 else "down" for v in seq]
 
 
-def generate_pseudorandom_series_codes(
+def _build_constrained_sequence(
     *,
-    n_flat: int = N_TEST_FLAT,
-    n_glide: int = N_TEST_GLIDE,
-    max_consecutive: int = PSEUDO_MAX_CONSEC,
-    seed: Optional[int] = None,
-    max_tries: int = PSEUDO_MAX_TRIES,
-) -> Tuple[List[int], int, int]:
-    """Generate a pseudo-random test series (1=FLAT, 2=GLIDE).
+    n1: int,
+    n2: int,
+    max_consecutive: int,
+    rng: random.Random,
+    max_restarts: int = 10_000,
+) -> List[int]:
+    """Build a length-(n1+n2) sequence with exact counts and a max-run constraint."""
+    total = int(n1) + int(n2)
+    if total <= 0:
+        return []
 
-    Conditions
-    ----------
-    - Total length = n_flat + n_glide
-    - Exactly n_flat of code 1 and n_glide of code 2
-    - No more than `max_consecutive` identical values in a row
+    for _ in range(int(max_restarts)):
+        rem = {1: int(n1), 2: int(n2)}
+        out: List[int] = []
+        while len(out) < total:
+            # last run length
+            last = out[-1] if out else None
+            run = 1
+            if last is not None:
+                run = 1
+                for j in range(len(out) - 2, -1, -1):
+                    if out[j] == last:
+                        run += 1
+                    else:
+                        break
+
+            candidates: List[int] = []
+            weights: List[float] = []
+            for v in (1, 2):
+                if rem[v] <= 0:
+                    continue
+                if last == v and run >= int(max_consecutive):
+                    continue
+                candidates.append(v)
+                weights.append(float(rem[v]))  # bias toward remaining count
+
+            if not candidates:
+                break  # restart
+
+            if len(candidates) == 1:
+                choice = candidates[0]
+            else:
+                choice = rng.choices(candidates, weights=weights, k=1)[0]
+            out.append(choice)
+            rem[choice] -= 1
+
+        if len(out) == total:
+            return out
+
+    raise RuntimeError("擬似ランダム系列の生成に失敗しました（制約が厳しすぎる可能性があります）。")
+
+
+def build_test_plan(
+    *,
+    series_name: str,
+    pseudo_seed: Optional[int] = None,
+    max_consecutive: int = 3,
+) -> Dict[str, Any]:
+    """Build a frozen test plan: trial schedule (100) + glide directions (60).
 
     Returns
     -------
-    codes : List[int]
-        List of 1/2 codes that satisfies the constraints.
-    seed_used : int
-        Seed used (for reproducibility).
-    n_tries : int
-        How many attempts were needed.
+    dict with keys:
+      - series_name
+      - schedule_codes: List[int] (len=100; 1=FLAT, 2=GLIDE)
+      - schedule_types: List[str] (len=100; "flat"/"glide")
+      - glide_dir_labels: List[str] (len=60; "up"/"down")
+      - glide_dir_codes: List[int] (len=60; 1=up, 2=down)
+      - pseudo_seed: Optional[int]
+      - max_consecutive: int
     """
-    n_flat = int(n_flat)
-    n_glide = int(n_glide)
-    max_consecutive = int(max_consecutive)
-    max_tries = int(max_tries)
+    series_name = str(series_name)
 
-    if n_flat < 0 or n_glide < 0:
-        raise ValueError("n_flat / n_glide must be non-negative.")
-    if max_consecutive < 1:
-        raise ValueError("max_consecutive must be >= 1.")
-    total = n_flat + n_glide
-    if total <= 0:
-        raise ValueError("total trials must be > 0.")
+    if series_name in FIXED_TRIAL_SERIES:
+        schedule_codes = list(FIXED_TRIAL_SERIES[series_name])
+        glide_dir_codes = list(FIXED_GLIDE_DIR_CODES[series_name])
+        seed_used: Optional[int] = None
+    else:
+        # pseudo-random (exact counts, max-run constraint)
+        seed_used = int(pseudo_seed) if pseudo_seed is not None else int(time.time())
+        rng = random.Random(seed_used)
+        schedule_codes = _build_constrained_sequence(
+            n1=40,
+            n2=60,
+            max_consecutive=int(max_consecutive),
+            rng=rng,
+        )
 
-    if seed is None:
-        seed = random.randrange(1_000_000_000)
+        # Also fix glide direction for reproducibility (30 up / 30 down; max-run constraint)
+        rng_dir = random.Random(seed_used + 1)
+        glide_dir_codes = _build_constrained_sequence(
+            n1=30,
+            n2=30,
+            max_consecutive=int(max_consecutive),
+            rng=rng_dir,
+        )
 
-    base_rng = random.Random(int(seed))
+    # Sanity checks
+    if len(schedule_codes) != N_TEST_TRIALS:
+        raise RuntimeError(f"trial schedule length mismatch: {len(schedule_codes)}")
+    if schedule_codes.count(1) != 40 or schedule_codes.count(2) != 60:
+        raise RuntimeError("trial schedule counts mismatch (need 40 FLAT / 60 GLIDE).")
+    if len(glide_dir_codes) != 60:
+        raise RuntimeError(f"glide direction schedule length mismatch: {len(glide_dir_codes)}")
+    if glide_dir_codes.count(1) != 30 or glide_dir_codes.count(2) != 30:
+        raise RuntimeError("glide direction counts mismatch (need 30 up / 30 down).")
 
-    for attempt in range(max_tries):
-        rng = random.Random(base_rng.randrange(1_000_000_000))
-
-        remaining = {1: n_flat, 2: n_glide}
-        seq: List[int] = []
-        last: Optional[int] = None
-        run = 0
-
-        for _ in range(total):
-            candidates: List[int] = []
-            for v in (1, 2):
-                if remaining[v] <= 0:
-                    continue
-                if v == last and run >= max_consecutive:
-                    continue
-                candidates.append(v)
-
-            if not candidates:
-                break  # fail -> restart
-
-            # Weighted random choice (proportional to remaining counts)
-            weights = [remaining[v] for v in candidates]
-            choice = int(rng.choices(candidates, weights=weights, k=1)[0])
-            seq.append(choice)
-            remaining[choice] -= 1
-
-            if choice == last:
-                run += 1
-            else:
-                last = choice
-                run = 1
-
-        if len(seq) == total and remaining[1] == 0 and remaining[2] == 0:
-            if max_consecutive_run(seq) <= max_consecutive:
-                return seq, int(seed), int(attempt + 1)
-
-    raise RuntimeError("Failed to generate pseudorandom series. Try increasing PSEUDO_MAX_TRIES.")
-
-
-def series_to_schedule(series_name: str) -> List[str]:
-    """Convert a *fixed* series name to schedule strings.
-
-    NOTE: 「擬似ランダム」は start_test() で生成し、st.session_state['schedule'] に固定します。
-    """
-    seq = FIXED_SERIES.get(series_name, SERIES_1)
-    return codes_to_schedule(seq)
+    return {
+        "series_name": series_name,
+        "schedule_codes": schedule_codes,
+        "schedule_types": _trial_codes_to_types(schedule_codes),
+        "glide_dir_codes": glide_dir_codes,
+        "glide_dir_labels": _dir_codes_to_labels(glide_dir_codes),
+        "pseudo_seed": seed_used,
+        "max_consecutive": int(max_consecutive),
+    }
 
 
 # -------------------------
@@ -263,7 +286,7 @@ def glide_stimulus_linear_ramp_to_center(
     delta: float,
     ramp_ms: int,
     steady_ms: int,
-    direction: str,  # "up" or "down" (randomized for variety; task is detection)
+    direction: str,  # "up" or "down"（本番は系列で固定／練習はランダム）
     edge_ramp_ms: int,
     target_rms: float,
 ) -> np.ndarray:
@@ -536,13 +559,6 @@ def init_state():
         "test_settings": None,
         "practice_settings": None,
         "schedule": None,
-        "schedule_codes": None,  # numeric codes (1/2) for the frozen schedule
-        "pseudo_seed": None,
-        "pseudo_attempts": None,
-        # pseudo-random preview (idle-time)
-        "pseudo_preview_codes": None,
-        "pseudo_preview_seed": None,
-        "pseudo_preview_attempts": None,
         "order_mode_test": "系列1",
         "results_view": "本番ログ",
         "last_feedback": None,
@@ -621,67 +637,50 @@ with st.sidebar:
 
     st.divider()
     st.subheader("本番（系列）")
-    order_mode_select = st.selectbox("系列（本番開始時に固定）", options=SERIES_OPTIONS, index=0)
+    order_mode_select = st.selectbox(
+        "系列（本番開始時に固定）",
+        options=["系列1", "系列2", "擬似ランダム"],
+        index=0,
+    )
 
-    if order_mode_select in FIXED_SERIES:
-        seq_preview = FIXED_SERIES[order_mode_select]
-        st.caption(f"この系列：**{len(seq_preview)} trial**（FLAT={seq_preview.count(1)} / GLIDE={seq_preview.count(2)}）")
+    # --- pseudo-random controls / preview ---
+    if "pseudo_seed" not in st.session_state:
+        st.session_state["pseudo_seed"] = int(time.time()) % 1_000_000_000
+    pseudo_seed = int(st.session_state["pseudo_seed"])
+    max_consecutive = 3
+
+    if order_mode_select == "擬似ランダム":
+        pseudo_seed = int(
+            st.number_input(
+                "擬似ランダム seed（本番開始時に固定）",
+                min_value=0,
+                max_value=999_999_999,
+                value=int(st.session_state["pseudo_seed"]),
+                step=1,
+            )
+        )
+        st.session_state["pseudo_seed"] = pseudo_seed
+
+        if st.button("🎲 seed をランダムにする"):
+            st.session_state["pseudo_seed"] = random.randint(0, 999_999_999)
+            st.rerun()
+
+        plan_preview = build_test_plan(series_name="擬似ランダム", pseudo_seed=pseudo_seed, max_consecutive=max_consecutive)
+        seq_preview = plan_preview["schedule_codes"]
+        st.caption(
+            f"擬似ランダム：**{len(seq_preview)} trial**（FLAT={seq_preview.count(1)} / GLIDE={seq_preview.count(2)}）"
+            f" / 連続制約：同一値は最大 {max_consecutive} 回まで"
+        )
+        with st.expander("擬似ランダム系列（1/2）のプレビュー"):
+            st.code(str(seq_preview), language="text")
+
+        st.caption("GLIDE方向も固定：**up=30 / down=30**（1=up, 2=down）。")
+        with st.expander("GLIDE方向系列（1=up,2=down）プレビュー"):
+            st.code(str(plan_preview["glide_dir_codes"]), language="text")
     else:
-        st.caption(f"擬似ランダム：**{N_TEST_TRIALS} trial**（FLAT={N_TEST_FLAT} / GLIDE={N_TEST_GLIDE}）")
-        st.caption(f"追加条件：同一値の連続は最大 **{PSEUDO_MAX_CONSEC}** 回（4回以上連続しません）")
-
-        # Preview generation (idle only) — can be used as the schedule when starting the test
-        if st.session_state.get("mode") == "idle":
-            if st.session_state.get("pseudo_preview_codes") is None:
-                codes, seed_used, n_tries = generate_pseudorandom_series_codes()
-                st.session_state["pseudo_preview_codes"] = codes
-                st.session_state["pseudo_preview_seed"] = seed_used
-                st.session_state["pseudo_preview_attempts"] = n_tries
-
-        with st.expander("擬似ランダムの系列コード（確認用）", expanded=False):
-            mode_now = st.session_state.get("mode", "idle")
-            in_use_series = st.session_state.get("order_mode_test", None) if mode_now in ["test", "finished"] else None
-
-            showing = "preview"
-            codes_show: List[int] = []
-            seed_show = None
-
-            if mode_now in ["test", "finished"] and in_use_series == "擬似ランダム":
-                showing = "in_use"
-                codes_show = st.session_state.get("schedule_codes") or []
-                seed_show = st.session_state.get("pseudo_seed")
-            else:
-                showing = "preview"
-                codes_show = st.session_state.get("pseudo_preview_codes") or []
-                seed_show = st.session_state.get("pseudo_preview_seed")
-
-            if showing == "in_use":
-                st.caption("表示中：本番で使用した擬似ランダム系列")
-            else:
-                st.caption("表示中：次回用の擬似ランダム（プレビュー）")
-
-            # Regenerate only in idle mode (preview only)
-            if mode_now == "idle":
-                if st.button("🔄 擬似ランダムを再生成", key="regen_pseudo_series"):
-                    codes, seed_used, n_tries = generate_pseudorandom_series_codes()
-                    st.session_state["pseudo_preview_codes"] = codes
-                    st.session_state["pseudo_preview_seed"] = seed_used
-                    st.session_state["pseudo_preview_attempts"] = n_tries
-                    codes_show = codes
-                    seed_show = seed_used
-
-            if seed_show is not None:
-                st.caption(f"seed: {seed_show}")
-
-            if codes_show:
-                st.caption(f"最大連続数（実測）: {max_consecutive_run(codes_show)}")
-                st.text_area(
-                    "系列コード（1=FLAT, 2=GLIDE）",
-                    value=", ".join([str(int(v)) for v in codes_show]),
-                    height=120,
-                )
-            else:
-                st.caption("系列コードはまだありません（本番開始時に確定します）。")
+        seq_preview = FIXED_TRIAL_SERIES[order_mode_select]
+        st.caption(f"この系列：**{len(seq_preview)} trial**（FLAT={seq_preview.count(1)} / GLIDE={seq_preview.count(2)}）")
+        st.caption("GLIDE方向も固定：**up=30 / down=30**（1=up, 2=down）。")
 
     st.caption("※ 表記：**1=FLAT**, **2=GLIDE**。本番は **100 trial固定**です。")
 
@@ -718,6 +717,8 @@ def snapshot_settings() -> Dict[str, Any]:
         "target_rms": float(target_rms),
         "n_trials": int(N_TEST_TRIALS),  # fixed 100
         "order_mode": str(order_mode_select),  # selected series (frozen at test start as well)
+        "pseudo_seed": None if str(order_mode_select) != "擬似ランダム" else int(st.session_state.get("pseudo_seed", 0)),
+        "max_consecutive": int(3),
         "start_ms": float(start_ms),
         "floor_ms": float(floor_ms),
         "ceil_ms": float(ceil_ms),
@@ -747,15 +748,28 @@ def validate_settings(s: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     if int(s.get("n_trials", -1)) != N_TEST_TRIALS:
         errors.append(f"本番 trial 数は {N_TEST_TRIALS} 固定です（現在: {s.get('n_trials')}）。")
 
-    # --- Series length / composition sanity ---
+    # --- Series sanity ---
     if len(SERIES_1) != N_TEST_TRIALS or len(SERIES_2) != N_TEST_TRIALS:
         errors.append("固定系列（Series 1/2）の長さが 100 trial ではありません（実装の整合性エラー）。")
-    if SERIES_1.count(1) != N_TEST_FLAT or SERIES_1.count(2) != N_TEST_GLIDE:
-        errors.append("固定系列（Series 1）のFLAT/GLIDE数が規定（40/60）と一致しません（実装の整合性エラー）。")
-    if SERIES_2.count(1) != N_TEST_FLAT or SERIES_2.count(2) != N_TEST_GLIDE:
-        errors.append("固定系列（Series 2）のFLAT/GLIDE数が規定（40/60）と一致しません（実装の整合性エラー）。")
-    if str(s.get("order_mode")) not in SERIES_OPTIONS:
-        errors.append(f"系列が不明です: {s.get('order_mode')}")
+
+    order = str(s.get("order_mode"))
+    series_options = ["系列1", "系列2", "擬似ランダム"]
+    if order not in series_options:
+        errors.append(f"系列が不明です: {order}")
+
+    # Fixed series: direction schedule must be aligned with GLIDE count (60)
+    if order in FIXED_TRIAL_SERIES:
+        if FIXED_TRIAL_SERIES[order].count(2) != 60:
+            errors.append("固定系列のGLIDE数が60ではありません（実装の整合性エラー）。")
+        if len(FIXED_GLIDE_DIR_CODES.get(order, [])) != 60:
+            errors.append("固定系列のGLIDE方向系列の長さが60ではありません（実装の整合性エラー）。")
+    else:
+        # pseudo-random
+        if s.get("pseudo_seed") is None:
+            errors.append("擬似ランダム seed が未設定です。")
+
+    if int(s.get("max_consecutive", 3)) < 1:
+        errors.append("連続制約（max_consecutive）は1以上にしてください。")
 
     # --- Stimulus params ---
     f0 = float(s.get("f_center", 0.0))
@@ -858,42 +872,25 @@ def start_test():
     # Freeze series at test start
     st.session_state["order_mode_test"] = str(order_mode_select)
 
-    # Build & freeze schedule (length 100)
-    series_name = st.session_state["order_mode_test"]
+    # Build & freeze test plan (schedule + glide directions)
+    plan = build_test_plan(
+        series_name=str(st.session_state["order_mode_test"]),
+        pseudo_seed=s.get("pseudo_seed"),
+        max_consecutive=int(s.get("max_consecutive", 3)),
+    )
+    st.session_state["test_plan"] = plan
+    st.session_state["schedule_codes"] = plan["schedule_codes"]
+    st.session_state["schedule_types"] = plan["schedule_types"]
+    st.session_state["glide_dir_codes"] = plan["glide_dir_codes"]
+    st.session_state["glide_dir_labels"] = plan["glide_dir_labels"]
 
-    if series_name == "擬似ランダム":
-        # Prefer the idle-time preview if available (so the operator can copy/record it beforehand)
-        preview_codes = st.session_state.get("pseudo_preview_codes")
-        preview_seed = st.session_state.get("pseudo_preview_seed")
-        preview_tries = st.session_state.get("pseudo_preview_attempts")
+    # Back-compat convenience
+    st.session_state["schedule"] = plan["schedule_types"]
 
-        if isinstance(preview_codes, list) and len(preview_codes) == N_TEST_TRIALS:
-            codes = [int(v) for v in preview_codes]
-            seed_used = int(preview_seed) if preview_seed is not None else None
-            tries_used = int(preview_tries) if preview_tries is not None else None
-        else:
-            codes, seed_used, tries_used = generate_pseudorandom_series_codes()
-
-        # Fallback if preview did not carry a seed
-        if seed_used is None or tries_used is None:
-            codes, seed_used, tries_used = generate_pseudorandom_series_codes()
-
-        st.session_state["schedule_codes"] = codes
-        st.session_state["schedule"] = codes_to_schedule(codes)
-        st.session_state["pseudo_seed"] = int(seed_used)
-        st.session_state["pseudo_attempts"] = int(tries_used)
-
-        # Also embed in settings snapshot for export/reproducibility
-        st.session_state["test_settings"]["pseudo_seed"] = int(seed_used)
-        st.session_state["test_settings"]["pseudo_max_consecutive"] = int(PSEUDO_MAX_CONSEC)
-    else:
-        codes = FIXED_SERIES.get(series_name, SERIES_1)
-        st.session_state["schedule_codes"] = [int(v) for v in codes]
-        st.session_state["schedule"] = codes_to_schedule(codes)
-        st.session_state["pseudo_seed"] = None
-        st.session_state["pseudo_attempts"] = None
-        st.session_state["test_settings"].pop("pseudo_seed", None)
-        st.session_state["test_settings"].pop("pseudo_max_consecutive", None)
+    # Keep reproducibility info in the frozen settings snapshot (shown in summary)
+    st.session_state["test_settings"]["pseudo_seed_used"] = plan.get("pseudo_seed")
+    st.session_state["test_settings"]["trial_schedule_codes"] = plan.get("schedule_codes")
+    st.session_state["test_settings"]["glide_direction_codes"] = plan.get("glide_dir_codes")
 
     # Early stop counters
     st.session_state["ceil_miss_streak"] = 0
@@ -956,35 +953,66 @@ def make_new_trial(mode: str):
     if not settings:
         settings = snapshot_settings()
 
+    glide_no_planned = None
+    glide_dir_code_planned = None
+    glide_dir_label_planned = None
+
     if mode == "practice":
         trial_type = random.choice(["flat", "glide"])
         D_ms = int(round(float(settings["ceil_ms"])))  # practice: easy-ish
         planned_no = len(st.session_state["practice_log"]) + 1
         planned_code = None
+        direction = random.choice(["up", "down"]) if trial_type == "glide" else "up"
     else:
         idx0 = int(st.session_state["test_trial_n"])  # 0-index for schedule
 
-        schedule = st.session_state.get("schedule")
-        if not schedule:
-            # Safety fallback: rebuild schedule from the frozen codes (do NOT regenerate pseudo-random here)
-            codes = st.session_state.get("schedule_codes")
-            if isinstance(codes, list) and len(codes) == N_TEST_TRIALS:
-                schedule = codes_to_schedule([int(v) for v in codes])
-            else:
-                schedule = series_to_schedule(st.session_state.get("order_mode_test", "系列1"))
-            st.session_state["schedule"] = schedule
+        # Frozen schedule (created in start_test)
+        schedule_types = st.session_state.get("schedule_types")
+        schedule_codes = st.session_state.get("schedule_codes")
+        glide_dir_labels = st.session_state.get("glide_dir_labels")
+        glide_dir_codes = st.session_state.get("glide_dir_codes")
 
-        if idx0 >= len(schedule):
-            # safety guard
+        if not (schedule_types and schedule_codes and glide_dir_labels and glide_dir_codes):
+            # Safety rebuild (should rarely happen)
+            frozen = st.session_state.get("test_settings") or snapshot_settings()
+            plan = build_test_plan(
+                series_name=str(st.session_state.get("order_mode_test", "系列1")),
+                pseudo_seed=frozen.get("pseudo_seed"),
+                max_consecutive=int(frozen.get("max_consecutive", 3)),
+            )
+            st.session_state["test_plan"] = plan
+            st.session_state["schedule_codes"] = plan["schedule_codes"]
+            st.session_state["schedule_types"] = plan["schedule_types"]
+            st.session_state["glide_dir_codes"] = plan["glide_dir_codes"]
+            st.session_state["glide_dir_labels"] = plan["glide_dir_labels"]
+            st.session_state["schedule"] = plan["schedule_types"]
+            schedule_types = plan["schedule_types"]
+            schedule_codes = plan["schedule_codes"]
+            glide_dir_labels = plan["glide_dir_labels"]
+            glide_dir_codes = plan["glide_dir_codes"]
+
+        if idx0 >= len(schedule_types):
             finish_test(reason="n_trials")
             return
-        trial_type = schedule[idx0]
+
+        trial_type = schedule_types[idx0]
         sc: DurationStaircase = st.session_state["staircase"]
         D_ms = int(round(float(sc.x_ms)))
         planned_no = idx0 + 1
         planned_code = 1 if trial_type == "flat" else 2
 
-    direction = random.choice(["up", "down"])  # variety only
+        # Fixed / pseudo-random glide direction (GLIDE trials only)
+        if trial_type == "glide":
+            glide_idx0 = int(list(schedule_codes[:idx0]).count(2))  # 0-based index within glide-only list
+            glide_no_planned = glide_idx0 + 1
+            if 0 <= glide_idx0 < len(glide_dir_labels):
+                glide_dir_label_planned = str(glide_dir_labels[glide_idx0])
+                glide_dir_code_planned = int(glide_dir_codes[glide_idx0])
+            else:
+                glide_dir_label_planned = random.choice(["up", "down"])
+                glide_dir_code_planned = 1 if glide_dir_label_planned == "up" else 2
+
+        direction = str(glide_dir_label_planned) if trial_type == "glide" else "up"
 
     wav, total_ms = generate_trial_wav_single(
         sr=int(settings["sr"]),
@@ -1003,13 +1031,14 @@ def make_new_trial(mode: str):
         "wav": wav,
         "trial_type": trial_type,
         "direction": direction if trial_type == "glide" else None,
+        "glide_no_planned": glide_no_planned,
+        "glide_direction_planned": glide_dir_label_planned,
+        "glide_direction_code_planned": glide_dir_code_planned,
         "D_ms": int(D_ms),
         "total_ms": int(total_ms),
         "trial_no_planned": int(planned_no),
         "trial_code_planned": planned_code,
         "series_name": st.session_state.get("order_mode_test") if mode == "test" else None,
-        "schedule_seed": st.session_state.get("pseudo_seed") if mode == "test" else None,
-        "schedule_max_consecutive": int(PSEUDO_MAX_CONSEC) if (mode == "test" and st.session_state.get("order_mode_test") == "擬似ランダム") else None,
         **settings,
         "created_at": time.time(),
     }
@@ -1041,11 +1070,14 @@ def record_response(subject_id: str, response: str):
         "trial_no": None,
         "trial_no_planned": trial.get("trial_no_planned"),
         "series_name": trial.get("series_name"),
-        "schedule_seed": trial.get("schedule_seed"),
-        "schedule_max_consecutive": trial.get("schedule_max_consecutive"),
+        "pseudo_seed_used": trial.get("pseudo_seed_used"),
+        "max_consecutive": trial.get("max_consecutive"),
         "trial_code_planned": trial.get("trial_code_planned"),  # 1=FLAT, 2=GLIDE (test only)
         "trial_type": trial_type,
         "direction": trial.get("direction"),
+        "glide_no_planned": trial.get("glide_no_planned"),
+        "glide_direction_planned": trial.get("glide_direction_planned"),
+        "glide_direction_code_planned": trial.get("glide_direction_code_planned"),
         "response": response,
         "correct": int(bool(correct)),
         "is_signal": int(bool(is_signal)),
@@ -1388,32 +1420,24 @@ else:
         st.markdown("#### 実施条件（スナップショット）")
         st.json(st.session_state.get("test_settings", {}))
 
+        # Reproducible series info
+        st.markdown("#### 使用系列（再現用）")
+        plan = st.session_state.get("test_plan", {}) or {}
+        series_used = plan.get("series_name", st.session_state.get("order_mode_test"))
+        seed_used = (st.session_state.get("test_settings", {}) or {}).get("pseudo_seed_used")
+        st.write(f"- 系列: **{series_used}**")
+        if series_used == "擬似ランダム":
+            st.write(f"- seed: **{seed_used}**")
+            st.write("- 制約: 1×40, 2×60 / 同一値の連続は最大3回")
+        st.write("- GLIDE方向: **up=30 / down=30**（1=up, 2=down）")
+
+        with st.expander("trial系列（1=FLAT,2=GLIDE）／GLIDE方向系列（1=up,2=down）"):
+            sset = st.session_state.get("test_settings", {}) or {}
+            st.code(str(sset.get("trial_schedule_codes", [])), language="text")
+            st.code(str(sset.get("glide_direction_codes", [])), language="text")
+
         st.markdown("#### reversals（GLIDE更新に基づく）")
         if sc is not None and len(sc.reversals) > 0:
             st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True, height=260)
         else:
             st.write("reversalなし")
-
-        st.markdown("#### 使用した系列（試行順・1=FLAT, 2=GLIDE）")
-        series_used = st.session_state.get("order_mode_test", "系列1")
-        st.write(f"- **系列**: **{series_used}**")
-
-        if series_used == "擬似ランダム":
-            seed_used = st.session_state.get("pseudo_seed")
-            tries_used = st.session_state.get("pseudo_attempts")
-            st.write(f"- **seed**: `{seed_used}`" if seed_used is not None else "- **seed**: —")
-            if tries_used is not None:
-                st.caption(f"生成試行回数（内部）: {int(tries_used)}")
-            st.caption(f"追加条件：同一値の連続は最大 {PSEUDO_MAX_CONSEC} 回")
-
-        codes_used = st.session_state.get("schedule_codes")
-        if isinstance(codes_used, list) and len(codes_used) == N_TEST_TRIALS:
-            mrun = max_consecutive_run([int(v) for v in codes_used])
-            st.caption(f"最大連続数（実測）: {mrun}")
-            st.text_area(
-                "系列コード（100個）",
-                value=", ".join([str(int(v)) for v in codes_used]),
-                height=120,
-            )
-        else:
-            st.write("系列コードが見つかりません。")
