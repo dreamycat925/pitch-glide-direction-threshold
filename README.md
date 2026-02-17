@@ -1,4 +1,4 @@
-# Pitch Glide (Pitch Change Detection) Threshold Test for Streamlit
+# Pitch Glide Detection Threshold Test for Streamlit
 ## (Single‑interval FLAT/GLIDE, Duration Staircase, Series 1–2, CSV export)
 
 **Purpose**  
@@ -53,6 +53,15 @@ Each trial plays **one stimulus** (FLAT or GLIDE).
 
 Participant answers:
 - **「変化あり（GLIDE）」** or **「変化なし（平坦＝FLAT）」**
+
+## 🔊 Example sounds (for instruction)
+To explain the rule to participants **before starting** Practice/Test, the app provides two **demo buttons** above the start controls:
+
+- **「変化あり（GLIDE）」**: plays a GLIDE example (**D = 300 ms**)
+- **「変化なし（FLAT）」**: plays a FLAT example (total duration is matched to the demo GLIDE)
+
+These demo sounds use the **current sidebar stimulus settings** (preset, Δf, ear, steady_ms, fade, etc.) and do **not** affect logs, staircase state, or trial counters.
+
 
 This avoids the cognitive load of 2‑interval comparison (2AFC) and is intended to be more robust for patients with reduced attention.
 
