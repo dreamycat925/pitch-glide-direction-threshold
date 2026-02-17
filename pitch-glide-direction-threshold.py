@@ -564,10 +564,10 @@ def init_state():
         "order_mode_test": "系列1",
         "results_view": "本番ログ",
         "last_feedback": None,
-        # demo (rule explanation)
+        # demo buttons (instruction only; not logged)
         "demo_wav": None,
-        "demo_meta": None,
-        "demo_autoplay": False,
+        "demo_label": None,
+        "demo_total_ms": None,
         # early stop streaks (GLIDE trials only; FLAT does not reset)
         "ceil_miss_streak": 0,
         "floor_hit_streak": 0,
@@ -832,56 +832,6 @@ def validate_settings(s: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     return errors, warnings
 
-
-# ============================================================
-# Demo sounds (for explaining the rule)
-# ============================================================
-def set_demo_sound(trial_type: str):
-    """Create and store a demo stimulus (GLIDE or FLAT) for rule explanation.
-
-    - Uses the current sidebar stimulus settings (preset, Δf, ear, steady, fade, etc.)
-    - Uses a fixed ramp duration D = DEMO_RAMP_MS (default 300 ms), as requested.
-    - This does NOT affect logs, staircase, or trial counters.
-    """
-    try:
-        s = snapshot_settings()
-
-        # Demo GLIDE: use a fixed direction (up) to keep it simple.
-        # (The actual test includes both up/down directions.)
-        direction = "up"
-
-        wav, total_ms = generate_trial_wav_single(
-            sr=int(s["sr"]),
-            f_center=float(s["f_center"]),
-            delta=float(s["delta"]),
-            ramp_ms=int(DEMO_RAMP_MS),
-            steady_ms=int(s["steady_ms"]),
-            ear=str(s["ear"]),
-            edge_ramp_ms=int(s["edge_ramp_ms"]),
-            target_rms=float(s["target_rms"]),
-            trial_type=str(trial_type),
-            direction=direction,
-        )
-
-        st.session_state["demo_wav"] = wav
-        st.session_state["demo_meta"] = {
-            "trial_type": str(trial_type),
-            "direction": direction if str(trial_type) == "glide" else None,
-            "D_ms": int(DEMO_RAMP_MS),
-            "steady_ms": int(s["steady_ms"]),
-            "total_ms": int(total_ms),
-            "f_center": float(s["f_center"]),
-            "delta": float(s["delta"]),
-            "ear": str(s["ear"]),
-        }
-        # autoplay ONCE (we turn it off right after rendering)
-        st.session_state["demo_autoplay"] = True
-
-    except Exception as e:
-        st.session_state["demo_wav"] = None
-        st.session_state["demo_meta"] = None
-        st.session_state["demo_autoplay"] = False
-        st.error(f"デモ音の生成に失敗しました: {e}")
 
 # ============================================================
 # Trial creation and response handling
@@ -1264,49 +1214,94 @@ if mode == "idle":
 
 
 
-# --- Demo buttons (for explaining the rule before starting) ---
-# Put these above "Start practice / Start test" as requested.
-st.caption("🔊 ルール説明用：下のボタンで **変化あり（GLIDE）** / **変化なし（FLAT）** の例を再生できます（D=300 ms）。")
+# ============================================================
+# Instruction demo sounds (does NOT affect logs / staircase)
+# ============================================================
+st.markdown("### 🔊 ルール説明用：試聴（デモ）")
+st.caption(
+    f"この試聴はログに記録されません。GLIDEは **UP** と **DOWN** を別々に再生できます。"
+    f"デモの周波数遷移（D, ramp_ms）は **{DEMO_RAMP_MS} ms 固定**です（FLATは total = D + steady_ms で長さ合わせ）。"
+)
 
+# Disable demo while a block is running (to discourage replay during test)
 demo_disabled = mode in ["practice", "test"]
-d1, d2 = st.columns(2)
+
+# Minimal safety check for demo generation
+try:
+    _s_demo = snapshot_settings()
+    _f0_demo = float(_s_demo.get("f_center", 0.0))
+    _df_demo = float(_s_demo.get("delta", 0.0))
+    if _f0_demo <= 0 or _df_demo <= 0 or _df_demo >= _f0_demo:
+        demo_disabled = True
+        st.warning("Δf と f_center の設定が不適切なため、試聴できません（Δf < f_center を満たすように調整してください）。")
+except Exception as _e:
+    demo_disabled = True
+    st.warning(f"設定の読み取りに失敗したため試聴できません: {_e}")
+
+d1, d2, d3 = st.columns(3)
 with d1:
-    st.button(
-        "🔊 変化あり（GLIDE）",
-        key="demo_btn_glide",
-        disabled=demo_disabled,
-        on_click=set_demo_sound,
-        args=("glide",),
-    )
+    if st.button("🔊 変化あり（UP）", disabled=demo_disabled, key="demo_glide_up"):
+        s = snapshot_settings()
+        wav, total_ms = generate_trial_wav_single(
+            sr=int(s["sr"]),
+            f_center=float(s["f_center"]),
+            delta=float(s["delta"]),
+            ramp_ms=int(DEMO_RAMP_MS),
+            steady_ms=int(s["steady_ms"]),
+            ear=str(s["ear"]),
+            edge_ramp_ms=int(s["edge_ramp_ms"]),
+            target_rms=float(s["target_rms"]),
+            trial_type="glide",
+            direction="up",
+        )
+        st.session_state["demo_wav"] = wav
+        st.session_state["demo_label"] = "GLIDE (UP)"
+        st.session_state["demo_total_ms"] = int(total_ms)
+
 with d2:
-    st.button(
-        "🔊 変化なし（FLAT）",
-        key="demo_btn_flat",
-        disabled=demo_disabled,
-        on_click=set_demo_sound,
-        args=("flat",),
+    if st.button("🔊 変化あり（DOWN）", disabled=demo_disabled, key="demo_glide_down"):
+        s = snapshot_settings()
+        wav, total_ms = generate_trial_wav_single(
+            sr=int(s["sr"]),
+            f_center=float(s["f_center"]),
+            delta=float(s["delta"]),
+            ramp_ms=int(DEMO_RAMP_MS),
+            steady_ms=int(s["steady_ms"]),
+            ear=str(s["ear"]),
+            edge_ramp_ms=int(s["edge_ramp_ms"]),
+            target_rms=float(s["target_rms"]),
+            trial_type="glide",
+            direction="down",
+        )
+        st.session_state["demo_wav"] = wav
+        st.session_state["demo_label"] = "GLIDE (DOWN)"
+        st.session_state["demo_total_ms"] = int(total_ms)
+
+with d3:
+    if st.button("🔊 変化なし（FLAT）", disabled=demo_disabled, key="demo_flat"):
+        s = snapshot_settings()
+        wav, total_ms = generate_trial_wav_single(
+            sr=int(s["sr"]),
+            f_center=float(s["f_center"]),
+            delta=float(s["delta"]),
+            ramp_ms=int(DEMO_RAMP_MS),
+            steady_ms=int(s["steady_ms"]),
+            ear=str(s["ear"]),
+            edge_ramp_ms=int(s["edge_ramp_ms"]),
+            target_rms=float(s["target_rms"]),
+            trial_type="flat",
+            direction="up",
+        )
+        st.session_state["demo_wav"] = wav
+        st.session_state["demo_label"] = "FLAT"
+        st.session_state["demo_total_ms"] = int(total_ms)
+
+if st.session_state.get("demo_wav") is not None:
+    st.audio(st.session_state["demo_wav"], format="audio/wav", autoplay=True)
+    st.caption(
+        f"再生：**{st.session_state.get('demo_label','')}**  |  "
+        f"D={DEMO_RAMP_MS} ms  |  total={st.session_state.get('demo_total_ms','—')} ms"
     )
-
-# Render the latest demo audio (autoplay only once)
-if (st.session_state.get("demo_wav") is not None) and (mode not in ["practice", "test"]):
-    meta = st.session_state.get("demo_meta", {}) or {}
-    st.audio(
-        st.session_state["demo_wav"],
-        format="audio/wav",
-        autoplay=bool(st.session_state.get("demo_autoplay", False)),
-    )
-    st.session_state["demo_autoplay"] = False
-
-    if meta:
-        if meta.get("trial_type") == "glide":
-            st.caption(
-                f"再生中：GLIDE（例） / D={meta.get('D_ms')} ms / steady={meta.get('steady_ms')} ms / total={meta.get('total_ms')} ms"
-            )
-        else:
-            st.caption(
-                f"再生中：FLAT（例） / total={meta.get('total_ms')} ms（D={meta.get('D_ms')} ms + steady={meta.get('steady_ms')} ms）"
-            )
-
 c1, c2, c3 = st.columns([1, 1, 1])
 with c1:
     st.button("🧪 練習を開始", disabled=(mode in ["practice", "test"] or bool(st.session_state.get("config_errors"))), on_click=start_practice)

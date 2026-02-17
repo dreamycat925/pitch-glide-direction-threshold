@@ -1,4 +1,4 @@
-# Pitch Glide Detection Threshold Test for Streamlit
+# Pitch Glide (Pitch Change Detection) Threshold Test for Streamlit
 ## (Single‑interval FLAT/GLIDE, Duration Staircase, Series 1–2, CSV export)
 
 **Purpose**  
@@ -54,20 +54,29 @@ Each trial plays **one stimulus** (FLAT or GLIDE).
 Participant answers:
 - **「変化あり（GLIDE）」** or **「変化なし（平坦＝FLAT）」**
 
-## 🔊 Example sounds (for instruction)
-To explain the rule to participants **before starting** Practice/Test, the app provides two **demo buttons** above the start controls:
-
-- **「変化あり（GLIDE）」**: plays a GLIDE example (**D = 300 ms**)
-- **「変化なし（FLAT）」**: plays a FLAT example (total duration is matched to the demo GLIDE)
-
-These demo sounds use the **current sidebar stimulus settings** (preset, Δf, ear, steady_ms, fade, etc.) and do **not** affect logs, staircase state, or trial counters.
-
-
 This avoids the cognitive load of 2‑interval comparison (2AFC) and is intended to be more robust for patients with reduced attention.
 
 ### Example patient instructions (Japanese)
 > 「いまの音は、**高さが変化**しましたか？  
 > 変化したと思ったら『変化あり』、変化しなかったら『変化なし』と答えてください。」
+
+---
+
+## 🔊 Instruction demo buttons (UP / DOWN / FLAT)
+
+To help explain the task rules, the app provides **demo playback buttons** (shown **above** the “Start Practice” / “Start Test” buttons):
+
+- **🔊 Change (UP)**: plays a GLIDE example with **upward** direction  
+- **🔊 Change (DOWN)**: plays a GLIDE example with **downward** direction  
+- **🔊 No change (FLAT)**: plays a FLAT example (duration matched to the GLIDE interval)
+
+**Demo duration**  
+- The GLIDE ramp duration is fixed to **D = 300 ms** for these demo buttons.  
+- The total FLAT duration is matched: `total_ms = D + steady_ms`.
+
+**Important**  
+- Demo playback is **not logged** and does **not** affect the staircase, counters, or results.
+- The demo uses the **current sidebar settings** (preset, Δf, ear, steady_ms, fade, RMS, etc.).
 
 ---
 
