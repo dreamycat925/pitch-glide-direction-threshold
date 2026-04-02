@@ -1176,6 +1176,11 @@ def validate_settings(s: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 # Trial creation and response handling
 # ============================================================
 def start_practice():
+    # Clear any demo audio so it cannot collide with trial playback widgets.
+    st.session_state["demo_wav"] = None
+    st.session_state["demo_label"] = None
+    st.session_state["demo_total_ms"] = None
+
     s = snapshot_settings()
     errors, warnings = validate_settings(s)
     st.session_state["config_errors"] = errors
@@ -1195,6 +1200,11 @@ def start_practice():
 
 
 def start_test():
+    # Clear any demo audio so it cannot collide with trial playback widgets.
+    st.session_state["demo_wav"] = None
+    st.session_state["demo_label"] = None
+    st.session_state["demo_total_ms"] = None
+
     s = snapshot_settings()
     errors, warnings = validate_settings(s)
     st.session_state["config_errors"] = errors
@@ -1635,7 +1645,7 @@ with d3:
         st.session_state["demo_label"] = "FLAT"
         st.session_state["demo_total_ms"] = int(total_ms)
 
-if st.session_state.get("demo_wav") is not None:
+if mode == "idle" and st.session_state.get("demo_wav") is not None:
     st.audio(st.session_state["demo_wav"], format="audio/wav", autoplay=True)
     st.caption(
         f"再生：**{st.session_state.get('demo_label','')}**  |  "
