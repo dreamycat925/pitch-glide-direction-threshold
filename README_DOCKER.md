@@ -30,7 +30,7 @@ docker compose -f docker-compose.dev.yml up -d --build
 
 Open:
 
-- http://localhost:30000
+- http://localhost:20000
 
 ## Notes
 

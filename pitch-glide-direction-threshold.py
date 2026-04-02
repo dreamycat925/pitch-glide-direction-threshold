@@ -1,4 +1,5 @@
 import io
+import json
 import random
 import time
 import wave
@@ -46,6 +47,14 @@ N_TEST_TRIALS = 100
 N_SMALL_REV_TARGET = 6  # threshold needs last 6 small-phase reversals
 
 DEMO_RAMP_MS = 300  # demo duration (ms) for the instruction buttons
+
+FINISH_REASON_LABELS = {
+    "small_reversals": f"small reversals {N_SMALL_REV_TARGET}個（閾値算出条件）",
+    "ceiling_miss": "D_maxで2回連続MISS",
+    "floor_hit": "D_minで4回連続HIT",
+    "n_trials": "n_trials到達",
+    "manual": "手動終了",
+}
 
 # -------------------------
 # Fixed test series (1=FLAT, 2=GLIDE) — length 100
@@ -536,6 +545,336 @@ class DurationStaircase:
         if len(usable) < N_SMALL_REV_TARGET:
             return None
         return float(np.median(usable[-N_SMALL_REV_TARGET:]))
+
+
+def finish_reason_label(reason: str) -> str:
+    return FINISH_REASON_LABELS.get(str(reason), str(reason))
+
+
+def format_ms(value: Optional[float]) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):.1f} ms"
+
+
+def format_ms_range(vmin: Optional[float], vmax: Optional[float]) -> str:
+    if vmin is None or vmax is None or pd.isna(vmin) or pd.isna(vmax):
+        return "—"
+    return f"{float(vmin):.1f}–{float(vmax):.1f} ms"
+
+
+def format_ms_list(values: List[float]) -> str:
+    vals = [float(x) for x in values]
+    if len(vals) == 0:
+        return "—"
+    return ", ".join([f"{x:.1f}" for x in vals])
+
+
+def format_session_time(ts: Optional[float]) -> str:
+    if ts is None:
+        return "—"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+
+
+def safe_filename_part(value: str) -> str:
+    text_value = str(value).strip()
+    if not text_value:
+        return "no_subject"
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text_value)
+    safe = safe.strip("_")
+    return safe or "no_subject"
+
+
+def get_subject_id_from_df(dft: pd.DataFrame) -> str:
+    if dft is None or dft.empty or "subject_id" not in dft.columns:
+        return ""
+    subjects = dft["subject_id"].fillna("").astype(str).str.strip()
+    for value in subjects:
+        if value:
+            return value
+    return ""
+
+
+def build_threshold_summary(sc: Optional[DurationStaircase]) -> Dict[str, Any]:
+    usable = sc.usable_reversal_levels() if sc is not None else []
+    usable = [float(x) for x in usable]
+
+    summary: Dict[str, Any] = {
+        "status": "none",
+        "status_label": "参考値なし",
+        "usable_count": int(len(usable)),
+        "usable_levels": usable,
+        "official_mean": None,
+        "official_median": None,
+        "official_levels": [],
+        "reference_median": None,
+        "reference_min": None,
+        "reference_max": None,
+    }
+
+    if len(usable) >= int(N_SMALL_REV_TARGET):
+        official_levels = usable[-int(N_SMALL_REV_TARGET):]
+        summary.update(
+            {
+                "status": "official",
+                "status_label": "正式閾値",
+                "official_mean": float(np.mean(official_levels)),
+                "official_median": float(np.median(official_levels)),
+                "official_levels": official_levels,
+            }
+        )
+    elif len(usable) >= 3:
+        summary.update(
+            {
+                "status": "provisional",
+                "status_label": "参考値（暫定中央値）",
+                "reference_median": float(np.median(usable)),
+            }
+        )
+    elif len(usable) == 2:
+        summary.update(
+            {
+                "status": "reference_range",
+                "status_label": "参考値（中央値＋範囲）",
+                "reference_median": float(np.median(usable)),
+                "reference_min": float(min(usable)),
+                "reference_max": float(max(usable)),
+            }
+        )
+
+    return summary
+
+
+def build_glide_convergence_chart_df(dft: pd.DataFrame) -> pd.DataFrame:
+    if dft is None or dft.empty or "trial_type" not in dft.columns:
+        return pd.DataFrame()
+
+    glide_df = dft[dft["trial_type"] == "glide"].copy()
+    if glide_df.empty:
+        return pd.DataFrame()
+
+    if "n_updates_glide" in glide_df.columns and glide_df["n_updates_glide"].notna().all():
+        glide_df["glide_count"] = glide_df["n_updates_glide"].astype(int)
+    elif "glide_no_planned" in glide_df.columns and glide_df["glide_no_planned"].notna().all():
+        glide_df["glide_count"] = glide_df["glide_no_planned"].astype(int)
+    else:
+        glide_df["glide_count"] = np.arange(1, len(glide_df) + 1)
+
+    glide_df = glide_df.sort_values("glide_count").reset_index(drop=True)
+    glide_df["reversal_flag"] = glide_df["reversal"].fillna(0).astype(int) if "reversal" in glide_df.columns else 0
+    glide_df["reversal_level_ms"] = glide_df["reversal_level_ms"] if "reversal_level_ms" in glide_df.columns else np.nan
+    glide_df["phase_label"] = glide_df["phase"].fillna("—") if "phase" in glide_df.columns else "—"
+    glide_df["correct_label"] = np.where(glide_df["correct"].fillna(0).astype(int) == 1, "HIT", "MISS")
+
+    return glide_df[
+        [
+            "glide_count",
+            "D_ms_presented",
+            "reversal_flag",
+            "reversal_level_ms",
+            "phase_label",
+            "correct_label",
+        ]
+    ].copy()
+
+
+def render_glide_convergence_chart(dft: pd.DataFrame, threshold_summary: Dict[str, Any]):
+    chart_df = build_glide_convergence_chart_df(dft)
+    if chart_df.empty:
+        st.caption("GLIDE試行がないため、収束グラフは表示できません。")
+        return
+
+    layers: List[Dict[str, Any]] = [
+        {
+            "data": {"values": chart_df.to_dict(orient="records")},
+            "mark": {"type": "line", "point": True},
+            "encoding": {
+                "x": {"field": "glide_count", "type": "quantitative", "title": "変化あり（GLIDE）提示数"},
+                "y": {"field": "D_ms_presented", "type": "quantitative", "title": "提示 D (ms)"},
+                "tooltip": [
+                    {"field": "glide_count", "type": "quantitative", "title": "GLIDE提示数"},
+                    {"field": "D_ms_presented", "type": "quantitative", "title": "提示 D (ms)", "format": ".1f"},
+                    {"field": "correct_label", "type": "nominal", "title": "反応"},
+                    {"field": "phase_label", "type": "nominal", "title": "phase"},
+                ],
+            },
+        }
+    ]
+
+    reversal_df = chart_df[chart_df["reversal_flag"] == 1].copy()
+    if not reversal_df.empty:
+        layers.append(
+            {
+                "data": {"values": reversal_df.to_dict(orient="records")},
+                "mark": {"type": "point", "shape": "diamond", "filled": True, "size": 120},
+                "encoding": {
+                    "x": {"field": "glide_count", "type": "quantitative"},
+                    "y": {"field": "reversal_level_ms", "type": "quantitative"},
+                    "tooltip": [
+                        {"field": "glide_count", "type": "quantitative", "title": "reversal時のGLIDE提示数"},
+                        {"field": "reversal_level_ms", "type": "quantitative", "title": "reversal level (ms)", "format": ".1f"},
+                        {"field": "phase_label", "type": "nominal", "title": "phase"},
+                    ],
+                },
+            }
+        )
+
+    ref_value: Optional[float] = None
+    ref_label: Optional[str] = None
+    if threshold_summary.get("status") == "official":
+        ref_value = threshold_summary.get("official_median")
+        ref_label = "正式閾値（中央値）"
+    elif threshold_summary.get("reference_median") is not None:
+        ref_value = threshold_summary.get("reference_median")
+        ref_label = threshold_summary.get("status_label")
+
+    if ref_value is not None and ref_label is not None:
+        layers.append(
+            {
+                "data": {"values": [{"value_ms": float(ref_value), "label": str(ref_label)}]},
+                "mark": {"type": "rule", "strokeDash": [6, 4]},
+                "encoding": {
+                    "y": {"field": "value_ms", "type": "quantitative"},
+                    "tooltip": [
+                        {"field": "label", "type": "nominal", "title": "指標"},
+                        {"field": "value_ms", "type": "quantitative", "title": "値 (ms)", "format": ".1f"},
+                    ],
+                },
+            }
+        )
+
+    chart_spec = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "width": "container",
+        "height": 320,
+        "layer": layers,
+    }
+    st.vega_lite_chart(spec=chart_spec, use_container_width=True)
+    st.caption("横軸は総試行数ではなく、変化あり（GLIDE）刺激の提示数です。")
+
+
+def build_summary_text(
+    *,
+    dft: pd.DataFrame,
+    sc: Optional[DurationStaircase],
+    threshold_summary: Dict[str, Any],
+    reason: str,
+    test_settings: Dict[str, Any],
+    plan: Dict[str, Any],
+    started_at: Optional[float],
+    finished_at: Optional[float],
+) -> str:
+    if dft is None or dft.empty:
+        return "結果サマリーはまだありません。"
+
+    n_total = len(dft)
+    n_signal = int(dft["is_signal"].sum()) if "is_signal" in dft.columns else 0
+    n_noise = max(0, n_total - n_signal)
+
+    hits = int(((dft["trial_type"] == "glide") & (dft["response"] == "change")).sum())
+    misses = int(((dft["trial_type"] == "glide") & (dft["response"] == "flat")).sum())
+    fas = int(((dft["trial_type"] == "flat") & (dft["response"] == "change")).sum())
+    crs = int(((dft["trial_type"] == "flat") & (dft["response"] == "flat")).sum())
+    acc = float(dft["correct"].mean()) * 100.0 if n_total else float("nan")
+
+    subject_id = get_subject_id_from_df(dft) or "—"
+    series_used = plan.get("series_name", test_settings.get("order_mode", "—"))
+    seed_used = test_settings.get("pseudo_seed_used")
+
+    lines: List[str] = [
+        "Pitch Glide / Pitch Change Detection Threshold Test - Summary",
+        f"出力日時: {format_session_time(time.time())}",
+        f"被験者ID: {subject_id}",
+        f"本番開始: {format_session_time(started_at)}",
+        f"本番終了: {format_session_time(finished_at)}",
+        "",
+        "[結果サマリー]",
+        f"trial数: {n_total}",
+        f"正答率: {acc:.1f}%" if n_total else "正答率: —",
+        f"HIT率（GLIDE）: {_rate(hits, n_signal)}",
+        f"FA率（FLAT）: {_rate(fas, n_noise)}",
+        "",
+        "[閾値（GLIDE duration）]",
+        f"small-step reversals: {threshold_summary.get('usable_count', 0)} / {N_SMALL_REV_TARGET}",
+    ]
+
+    status = threshold_summary.get("status")
+    if status == "official":
+        lines.extend(
+            [
+                f"正式閾値（中央値）: {format_ms(threshold_summary.get('official_median'))}",
+                f"正式閾値（平均）: {format_ms(threshold_summary.get('official_mean'))}",
+                f"小ステップ期・最後{N_SMALL_REV_TARGET} reversals (ms): {format_ms_list(threshold_summary.get('official_levels', []))}",
+            ]
+        )
+    elif status == "provisional":
+        lines.extend(
+            [
+                "正式閾値: — （small-step reversals不足）",
+                f"参考値（暫定中央値）: {format_ms(threshold_summary.get('reference_median'))}",
+                f"小ステップ期 reversals (ms): {format_ms_list(threshold_summary.get('usable_levels', []))}",
+            ]
+        )
+    elif status == "reference_range":
+        lines.extend(
+            [
+                "正式閾値: — （small-step reversals不足）",
+                f"参考値（中央値）: {format_ms(threshold_summary.get('reference_median'))}",
+                f"参考範囲: {format_ms_range(threshold_summary.get('reference_min'), threshold_summary.get('reference_max'))}",
+                f"小ステップ期 reversals (ms): {format_ms_list(threshold_summary.get('usable_levels', []))}",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "正式閾値: — （small-step reversals不足）",
+                "参考値: なし",
+                f"小ステップ期 reversals (ms): {format_ms_list(threshold_summary.get('usable_levels', []))}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "[反応内訳]",
+            f"HIT: {hits}",
+            f"MISS: {misses}",
+            f"FA: {fas}",
+            f"CR: {crs}",
+            "",
+            "[終了条件]",
+            finish_reason_label(reason),
+            "",
+            "[実施条件（スナップショット）]",
+            json.dumps(test_settings, ensure_ascii=False, indent=2),
+            "",
+            "[使用系列（再現用）]",
+            f"系列: {series_used}",
+        ]
+    )
+
+    if series_used == "擬似ランダム":
+        lines.append(f"seed: {seed_used}")
+        lines.append("制約: 1×40, 2×60 / 同一値の連続は最大3回")
+
+    lines.extend(
+        [
+            "GLIDE方向: up=30 / down=30（1=up, 2=down）",
+            f"trial系列（1=FLAT,2=GLIDE）: {test_settings.get('trial_schedule_codes', [])}",
+            f"GLIDE方向系列（1=up,2=down）: {test_settings.get('glide_direction_codes', [])}",
+        ]
+    )
+
+    if sc is not None and len(sc.reversals) > 0:
+        lines.extend(
+            [
+                "",
+                "[reversals（GLIDE更新に基づく）]",
+                pd.DataFrame(sc.reversals).to_string(index=False),
+            ]
+        )
+
+    return "\n".join(lines) + "\n"
 
 
 # ============================================================
@@ -1384,14 +1723,7 @@ elif mode in ["practice", "test"]:
 elif mode == "finished":
     st.subheader("✅ 本番終了（結果サマリーは下）")
     reason = st.session_state.get("finished_reason", "n_trials")
-    reason_map = {
-        "small_reversals": "small reversals 6個（閾値算出条件）",
-        "ceiling_miss": "D_maxで2回連続MISS",
-        "floor_hit": "D_minで4回連続HIT",
-        "n_trials": "n_trials到達",
-        "manual": "手動終了",
-    }
-    st.caption(f"終了条件：**{reason_map.get(str(reason), str(reason))}**")
+    st.caption(f"終了条件：**{finish_reason_label(reason)}**")
 
 # ============================================================
 # 📌 Logs / Results (always visible) — button switch
@@ -1461,8 +1793,7 @@ else:
     else:
         dft = pd.DataFrame(st.session_state["test_log"])
         sc: DurationStaircase = st.session_state.get("staircase")
-        thr_med = st.session_state.get("threshold_final_median")
-        thr_mean = st.session_state.get("threshold_final_mean")
+        threshold_summary = build_threshold_summary(sc)
 
         n_total = len(dft)
         n_signal = int(dft["is_signal"].sum())
@@ -1475,6 +1806,9 @@ else:
 
         acc = float(dft["correct"].mean()) * 100.0 if n_total else float("nan")
 
+        reason = st.session_state.get("finished_reason", "n_trials")
+        point_label = "100 trial時点" if str(reason) == "n_trials" else "終了時点"
+
         st.markdown("### ✅ 結果サマリー（本番）")
 
         m1, m2, m3, m4 = st.columns(4)
@@ -1484,16 +1818,39 @@ else:
         m4.metric("FA率（FLAT）", _rate(fas, n_noise))
 
         st.markdown("#### 閾値（GLIDE duration）")
-        if thr_med is None and thr_mean is None:
-            st.warning("reversal数が不足しているため、閾値を算出できません（小ステップ期で6 reversalsが必要）。")
-        else:
-            st.write(f"- **閾値（中央値）**: **{thr_med:.1f} ms**" if thr_med is not None else "- 閾値（中央値）: —")
-            st.write(f"- 閾値（平均）: {thr_mean:.1f} ms" if thr_mean is not None else "- 閾値（平均）: —")
+        st.write(f"- **small-step reversals**: {threshold_summary.get('usable_count', 0)} / {N_SMALL_REV_TARGET}")
 
-            usable = sc.usable_reversal_levels() if sc is not None else []
-            if len(usable) >= N_SMALL_REV_TARGET:
-                last6 = usable[-N_SMALL_REV_TARGET:]
-                st.caption(f"小ステップ期・最後{N_SMALL_REV_TARGET} reversals: {', '.join([f'{x:.1f}' for x in last6])}")
+        status = threshold_summary.get("status")
+        if status == "official":
+            st.write(f"- **正式閾値（中央値）**: **{threshold_summary['official_median']:.1f} ms**")
+            st.write(f"- 正式閾値（平均）: {threshold_summary['official_mean']:.1f} ms")
+            st.caption(
+                f"小ステップ期・最後{N_SMALL_REV_TARGET} reversals: "
+                f"{format_ms_list(threshold_summary.get('official_levels', []))}"
+            )
+        elif status == "provisional":
+            st.info(f"{point_label}では正式閾値に未達のため、参考値（暫定中央値）を表示しています。")
+            st.write(f"- **参考値（暫定中央値）**: **{threshold_summary['reference_median']:.1f} ms**")
+            st.caption(
+                f"小ステップ期 reversals: {format_ms_list(threshold_summary.get('usable_levels', []))}"
+            )
+        elif status == "reference_range":
+            st.info(f"{point_label}では正式閾値に未達のため、参考値と参考範囲を表示しています。")
+            st.write(f"- **参考値（中央値）**: **{threshold_summary['reference_median']:.1f} ms**")
+            st.write(
+                f"- **参考範囲**: {threshold_summary['reference_min']:.1f}–{threshold_summary['reference_max']:.1f} ms"
+            )
+            st.caption(
+                f"小ステップ期 reversals: {format_ms_list(threshold_summary.get('usable_levels', []))}"
+            )
+        else:
+            st.warning(f"{point_label}での small-step reversals が 0–1 個のため、参考値はありません。")
+            st.caption(
+                f"小ステップ期 reversals: {format_ms_list(threshold_summary.get('usable_levels', []))}"
+            )
+
+        st.markdown("#### 収束の折れ線グラフ")
+        render_glide_convergence_chart(dft, threshold_summary)
 
         st.markdown("#### 反応内訳")
         cA, cB, cC, cD = st.columns(4)
@@ -1503,24 +1860,16 @@ else:
         cD.metric("CR", str(crs))
 
         st.markdown("#### 終了条件")
-        reason = st.session_state.get("finished_reason", "n_trials")
-        reason_map = {
-            "small_reversals": "small reversals 6個（閾値算出条件）",
-            "ceiling_miss": "D_maxで2回連続MISS",
-            "floor_hit": "D_minで4回連続HIT",
-            "n_trials": "n_trials到達",
-            "manual": "手動終了",
-        }
-        st.write(f"- **{reason_map.get(str(reason), str(reason))}**")
+        st.write(f"- **{finish_reason_label(reason)}**")
 
         st.markdown("#### 実施条件（スナップショット）")
-        st.json(st.session_state.get("test_settings", {}))
+        test_settings = st.session_state.get("test_settings", {}) or {}
+        st.json(test_settings)
 
-        # Reproducible series info
         st.markdown("#### 使用系列（再現用）")
         plan = st.session_state.get("test_plan", {}) or {}
         series_used = plan.get("series_name", st.session_state.get("order_mode_test"))
-        seed_used = (st.session_state.get("test_settings", {}) or {}).get("pseudo_seed_used")
+        seed_used = test_settings.get("pseudo_seed_used")
         st.write(f"- 系列: **{series_used}**")
         if series_used == "擬似ランダム":
             st.write(f"- seed: **{seed_used}**")
@@ -1528,12 +1877,37 @@ else:
         st.write("- GLIDE方向: **up=30 / down=30**（1=up, 2=down）")
 
         with st.expander("trial系列（1=FLAT,2=GLIDE）／GLIDE方向系列（1=up,2=down）"):
-            sset = st.session_state.get("test_settings", {}) or {}
-            st.code(str(sset.get("trial_schedule_codes", [])), language="text")
-            st.code(str(sset.get("glide_direction_codes", [])), language="text")
+            st.code(str(test_settings.get("trial_schedule_codes", [])), language="text")
+            st.code(str(test_settings.get("glide_direction_codes", [])), language="text")
 
         st.markdown("#### reversals（GLIDE更新に基づく）")
         if sc is not None and len(sc.reversals) > 0:
             st.dataframe(pd.DataFrame(sc.reversals), use_container_width=True, height=260)
         else:
             st.write("reversalなし")
+
+        summary_text = build_summary_text(
+            dft=dft,
+            sc=sc,
+            threshold_summary=threshold_summary,
+            reason=str(reason),
+            test_settings=test_settings,
+            plan=plan,
+            started_at=st.session_state.get("started_at"),
+            finished_at=st.session_state.get("finished_at"),
+        )
+        subject_part = safe_filename_part(get_subject_id_from_df(dft))
+        finished_at = st.session_state.get("finished_at")
+        finished_tag = (
+            time.strftime("%Y%m%d_%H%M%S", time.localtime(float(finished_at)))
+            if finished_at is not None
+            else time.strftime("%Y%m%d_%H%M%S")
+        )
+
+        st.download_button(
+            "⬇️ Summary .txt をダウンロード",
+            data=summary_text.encode("utf-8-sig"),
+            file_name=f"pitch_glide_summary_{subject_part}_{finished_tag}.txt",
+            mime="text/plain",
+            key="download_summary_txt",
+        )
