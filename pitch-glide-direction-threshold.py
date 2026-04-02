@@ -661,8 +661,13 @@ def build_glide_convergence_chart_df(dft: pd.DataFrame) -> pd.DataFrame:
         glide_df["glide_count"] = np.arange(1, len(glide_df) + 1)
 
     glide_df = glide_df.sort_values("glide_count").reset_index(drop=True)
+    glide_df["D_ms_presented"] = pd.to_numeric(glide_df.get("D_ms_presented"), errors="coerce")
     glide_df["reversal_flag"] = glide_df["reversal"].fillna(0).astype(int) if "reversal" in glide_df.columns else 0
-    glide_df["reversal_level_ms"] = glide_df["reversal_level_ms"] if "reversal_level_ms" in glide_df.columns else np.nan
+    glide_df["reversal_level_ms"] = (
+        pd.to_numeric(glide_df["reversal_level_ms"], errors="coerce")
+        if "reversal_level_ms" in glide_df.columns
+        else np.nan
+    )
     glide_df["phase_label"] = glide_df["phase"].fillna("—") if "phase" in glide_df.columns else "—"
     glide_df["correct_label"] = np.where(glide_df["correct"].fillna(0).astype(int) == 1, "HIT", "MISS")
 
@@ -678,15 +683,27 @@ def build_glide_convergence_chart_df(dft: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
+def chart_records_json_safe(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    if df is None or df.empty:
+        return []
+    safe_df = df.copy().replace([np.inf, -np.inf], np.nan)
+    return json.loads(safe_df.to_json(orient="records", force_ascii=False))
+
+
 def render_glide_convergence_chart(dft: pd.DataFrame, threshold_summary: Dict[str, Any]):
     chart_df = build_glide_convergence_chart_df(dft)
     if chart_df.empty:
         st.caption("GLIDE試行がないため、収束グラフは表示できません。")
         return
 
+    line_df = chart_df[chart_df["D_ms_presented"].notna()].copy()
+    if line_df.empty:
+        st.caption("GLIDE試行の D 値が取得できないため、収束グラフは表示できません。")
+        return
+
     layers: List[Dict[str, Any]] = [
         {
-            "data": {"values": chart_df.to_dict(orient="records")},
+            "data": {"values": chart_records_json_safe(line_df)},
             "mark": {"type": "line", "point": True},
             "encoding": {
                 "x": {"field": "glide_count", "type": "quantitative", "title": "変化あり（GLIDE）提示数"},
@@ -701,11 +718,11 @@ def render_glide_convergence_chart(dft: pd.DataFrame, threshold_summary: Dict[st
         }
     ]
 
-    reversal_df = chart_df[chart_df["reversal_flag"] == 1].copy()
+    reversal_df = chart_df[(chart_df["reversal_flag"] == 1) & chart_df["reversal_level_ms"].notna()].copy()
     if not reversal_df.empty:
         layers.append(
             {
-                "data": {"values": reversal_df.to_dict(orient="records")},
+                "data": {"values": chart_records_json_safe(reversal_df)},
                 "mark": {"type": "point", "shape": "diamond", "filled": True, "size": 120},
                 "encoding": {
                     "x": {"field": "glide_count", "type": "quantitative"},
