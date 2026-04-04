@@ -482,6 +482,7 @@ class DurationStaircase:
         """
         self.trial_index_updates += 1
         prev_x = float(self.x_ms)
+        phase_before = self.phase()
         step = float(self.current_step())
 
         direction: Optional[str] = None
@@ -505,7 +506,7 @@ class DurationStaircase:
                 {
                     "update_index": int(self.trial_index_updates),
                     "level_ms": float(reversal_level),
-                    "phase": self.phase(),
+                    "phase": phase_before,
                     "step_ms": float(step),
                 }
             )
@@ -519,7 +520,9 @@ class DurationStaircase:
             "direction": direction,
             "step_used_ms": step,
             "phase": self.phase(),
+            "phase_before": phase_before,
             "reversal": reversal,
+            "reversal_phase": phase_before if reversal else None,
             "reversal_level_ms": reversal_level,
             "n_reversals": len(self.reversals),
             "n_updates": int(self.trial_index_updates),
@@ -669,6 +672,10 @@ def build_glide_convergence_chart_df(dft: pd.DataFrame) -> pd.DataFrame:
         else np.nan
     )
     glide_df["phase_label"] = glide_df["phase"].fillna("—") if "phase" in glide_df.columns else "—"
+    if "reversal_phase" in glide_df.columns:
+        glide_df["reversal_phase_label"] = glide_df["reversal_phase"].fillna(glide_df["phase_label"])
+    else:
+        glide_df["reversal_phase_label"] = glide_df["phase_label"]
     glide_df["correct_label"] = np.where(glide_df["correct"].fillna(0).astype(int) == 1, "HIT", "MISS")
 
     return glide_df[
@@ -678,6 +685,7 @@ def build_glide_convergence_chart_df(dft: pd.DataFrame) -> pd.DataFrame:
             "reversal_flag",
             "reversal_level_ms",
             "phase_label",
+            "reversal_phase_label",
             "correct_label",
         ]
     ].copy()
@@ -720,21 +728,42 @@ def render_glide_convergence_chart(dft: pd.DataFrame, threshold_summary: Dict[st
 
     reversal_df = chart_df[(chart_df["reversal_flag"] == 1) & chart_df["reversal_level_ms"].notna()].copy()
     if not reversal_df.empty:
-        layers.append(
-            {
-                "data": {"values": chart_records_json_safe(reversal_df)},
-                "mark": {"type": "point", "shape": "diamond", "filled": True, "size": 120},
-                "encoding": {
-                    "x": {"field": "glide_count", "type": "quantitative"},
-                    "y": {"field": "reversal_level_ms", "type": "quantitative"},
-                    "tooltip": [
-                        {"field": "glide_count", "type": "quantitative", "title": "reversal時のGLIDE提示数"},
-                        {"field": "reversal_level_ms", "type": "quantitative", "title": "reversal level (ms)", "format": ".1f"},
-                        {"field": "phase_label", "type": "nominal", "title": "phase"},
-                    ],
-                },
-            }
-        )
+        big_reversal_df = reversal_df[reversal_df["reversal_phase_label"] != "small"].copy()
+        small_reversal_df = reversal_df[reversal_df["reversal_phase_label"] == "small"].copy()
+
+        if not big_reversal_df.empty:
+            layers.append(
+                {
+                    "data": {"values": chart_records_json_safe(big_reversal_df)},
+                    "mark": {"type": "point", "shape": "diamond", "filled": True, "size": 120, "color": "#1f77b4"},
+                    "encoding": {
+                        "x": {"field": "glide_count", "type": "quantitative"},
+                        "y": {"field": "reversal_level_ms", "type": "quantitative"},
+                        "tooltip": [
+                            {"field": "glide_count", "type": "quantitative", "title": "reversal時のGLIDE提示数"},
+                            {"field": "reversal_level_ms", "type": "quantitative", "title": "reversal level (ms)", "format": ".1f"},
+                            {"field": "reversal_phase_label", "type": "nominal", "title": "reversal phase"},
+                        ],
+                    },
+                }
+            )
+
+        if not small_reversal_df.empty:
+            layers.append(
+                {
+                    "data": {"values": chart_records_json_safe(small_reversal_df)},
+                    "mark": {"type": "point", "shape": "diamond", "filled": True, "size": 150, "color": "#d62728"},
+                    "encoding": {
+                        "x": {"field": "glide_count", "type": "quantitative"},
+                        "y": {"field": "reversal_level_ms", "type": "quantitative"},
+                        "tooltip": [
+                            {"field": "glide_count", "type": "quantitative", "title": "reversal時のGLIDE提示数"},
+                            {"field": "reversal_level_ms", "type": "quantitative", "title": "reversal level (ms)", "format": ".1f"},
+                            {"field": "reversal_phase_label", "type": "nominal", "title": "reversal phase"},
+                        ],
+                    },
+                }
+            )
 
     ref_value: Optional[float] = None
     ref_label: Optional[str] = None
@@ -767,7 +796,7 @@ def render_glide_convergence_chart(dft: pd.DataFrame, threshold_summary: Dict[st
         "layer": layers,
     }
     st.vega_lite_chart(spec=chart_spec, use_container_width=True)
-    st.caption("横軸は総試行数ではなく、変化あり（GLIDE）刺激の提示数です。")
+    st.caption("横軸は総試行数ではなく、変化あり（GLIDE）刺激の提示数です。青ダイヤ = big-step reversal、赤ダイヤ = small-step reversal。")
 
 
 def build_summary_text(
@@ -1523,6 +1552,7 @@ def record_response(subject_id: str, response: str):
                 "direction_update": None if upd is None else upd["direction"],
                 "step_used_ms": None if upd is None else upd["step_used_ms"],
                 "phase": None if upd is None else upd["phase"],
+                "reversal_phase": None if upd is None else upd.get("reversal_phase"),
                 "reversal": 0 if upd is None else int(bool(upd["reversal"])),
                 "reversal_level_ms": None if upd is None else upd["reversal_level_ms"],
                 "n_reversals": int(len(sc.reversals)),
@@ -1729,13 +1759,12 @@ elif mode in ["practice", "test"]:
         st.caption(f"練習：GLIDE-HIT 連続 {st.session_state.get('practice_streak', 0)} / 5（FLATはカウントに影響しません）")
 
     if not st.session_state["awaiting_answer"]:
-        if st.button("▶️ 提示", key=f"present_{mode}"):
-            make_new_trial(mode)
-            st.rerun()
+        make_new_trial(mode)
 
     trial = st.session_state.get("trial")
     if st.session_state["awaiting_answer"] and trial:
-        st.audio(trial["wav"], format="audio/wav", autoplay=True)
+        st.audio(trial["wav"], format="audio/wav")
+        st.caption("上の再生ボタンで音を聞いてから、下の質問に回答してください。")
         st.markdown("**質問**：今の音は **高さが変化**しましたか？")
         a1, a2 = st.columns(2)
         with a1:
