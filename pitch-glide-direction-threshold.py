@@ -54,6 +54,7 @@ FINISH_REASON_LABELS = {
     "floor_hit": "D_minで4回連続HIT",
     "n_trials": "n_trials到達",
     "manual": "手動終了",
+    "internal_error": "内部エラー",
 }
 
 # -------------------------
@@ -588,16 +589,6 @@ def safe_filename_part(value: str) -> str:
     return safe or "no_subject"
 
 
-def get_subject_id_from_df(dft: pd.DataFrame) -> str:
-    if dft is None or dft.empty or "subject_id" not in dft.columns:
-        return ""
-    subjects = dft["subject_id"].fillna("").astype(str).str.strip()
-    for value in subjects:
-        if value:
-            return value
-    return ""
-
-
 def build_threshold_summary(sc: Optional[DurationStaircase]) -> Dict[str, Any]:
     usable = sc.usable_reversal_levels() if sc is not None else []
     usable = [float(x) for x in usable]
@@ -823,14 +814,12 @@ def build_summary_text(
     crs = int(((dft["trial_type"] == "flat") & (dft["response"] == "flat")).sum())
     acc = float(dft["correct"].mean()) * 100.0 if n_total else float("nan")
 
-    subject_id = get_subject_id_from_df(dft) or "—"
     series_used = plan.get("series_name", test_settings.get("order_mode", "—"))
     seed_used = test_settings.get("pseudo_seed_used")
 
     lines: List[str] = [
         "Pitch Glide / Pitch Change Detection Threshold Test - Summary",
         f"出力日時: {format_session_time(time.time())}",
-        f"被験者ID: {subject_id}",
         f"本番開始: {format_session_time(started_at)}",
         f"本番終了: {format_session_time(finished_at)}",
         "",
@@ -945,7 +934,12 @@ def init_state():
         "finished_reason": None,
         "test_settings": None,
         "practice_settings": None,
+        "test_plan": None,
         "schedule": None,
+        "schedule_codes": None,
+        "schedule_types": None,
+        "glide_dir_codes": None,
+        "glide_dir_labels": None,
         "order_mode_test": "系列1",
         "results_view": "本番ログ",
         "last_feedback": None,
@@ -953,6 +947,7 @@ def init_state():
         "demo_wav": None,
         "demo_label": None,
         "demo_total_ms": None,
+        "runtime_error": None,
         # early stop streaks (GLIDE trials only; FLAT does not reset)
         "ceil_miss_streak": 0,
         "floor_hit_streak": 0,
@@ -971,6 +966,42 @@ def reset_all():
     init_state()
 
 
+def clear_practice_state(*, clear_log: bool):
+    st.session_state["practice_streak"] = 0
+    st.session_state["practice_settings"] = None
+    st.session_state["last_feedback"] = None
+    if clear_log:
+        st.session_state["practice_log"] = []
+
+
+def clear_test_state(*, clear_log: bool):
+    st.session_state["staircase"] = None
+    st.session_state["test_trial_n"] = 0
+    st.session_state["threshold_live_mean"] = None
+    st.session_state["threshold_live_median"] = None
+    st.session_state["threshold_final_mean"] = None
+    st.session_state["threshold_final_median"] = None
+    st.session_state["started_at"] = None
+    st.session_state["finished_at"] = None
+    st.session_state["finished_reason"] = None
+    st.session_state["test_settings"] = None
+    st.session_state["test_plan"] = None
+    st.session_state["schedule"] = None
+    st.session_state["schedule_codes"] = None
+    st.session_state["schedule_types"] = None
+    st.session_state["glide_dir_codes"] = None
+    st.session_state["glide_dir_labels"] = None
+    st.session_state["ceil_miss_streak"] = 0
+    st.session_state["floor_hit_streak"] = 0
+    st.session_state["order_mode_test"] = "系列1"
+    if clear_log:
+        st.session_state["test_log"] = []
+
+
+def set_runtime_error(message: Optional[str]):
+    st.session_state["runtime_error"] = None if message is None else str(message)
+
+
 init_state()
 
 
@@ -979,8 +1010,6 @@ init_state()
 # ============================================================
 with st.sidebar:
     st.header("⚙️ 設定")
-
-    subject_id = st.text_input("被験者ID（任意）", value="")
 
     preset_name = st.radio("周波数帯（プリセット）", list(PRESETS.keys()), index=0)
     f_center = float(PRESETS[preset_name]["f_center"])
@@ -1226,6 +1255,7 @@ def start_practice():
     st.session_state["demo_wav"] = None
     st.session_state["demo_label"] = None
     st.session_state["demo_total_ms"] = None
+    set_runtime_error(None)
 
     s = snapshot_settings()
     errors, warnings = validate_settings(s)
@@ -1236,11 +1266,10 @@ def start_practice():
         return
 
     st.session_state["mode"] = "practice"
-    st.session_state["practice_streak"] = 0
-    st.session_state["practice_log"] = []
+    clear_test_state(clear_log=False)
+    clear_practice_state(clear_log=True)
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
-    st.session_state["last_feedback"] = None
     st.session_state["practice_settings"] = s
     st.session_state["results_view"] = "練習ログ"
 
@@ -1250,6 +1279,7 @@ def start_test():
     st.session_state["demo_wav"] = None
     st.session_state["demo_label"] = None
     st.session_state["demo_total_ms"] = None
+    set_runtime_error(None)
 
     s = snapshot_settings()
     errors, warnings = validate_settings(s)
@@ -1260,25 +1290,29 @@ def start_test():
         return
 
     st.session_state["mode"] = "test"
-    st.session_state["test_log"] = []
+    clear_practice_state(clear_log=False)
+    clear_test_state(clear_log=True)
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
-    st.session_state["last_feedback"] = None
     st.session_state["started_at"] = time.time()
-    st.session_state["finished_at"] = None
-    st.session_state["finished_reason"] = None
     st.session_state["test_settings"] = s
-    st.session_state["test_trial_n"] = 0
 
     # Freeze series at test start
     st.session_state["order_mode_test"] = str(order_mode_select)
 
     # Build & freeze test plan (schedule + glide directions)
-    plan = build_test_plan(
-        series_name=str(st.session_state["order_mode_test"]),
-        pseudo_seed=s.get("pseudo_seed"),
-        max_consecutive=int(s.get("max_consecutive", 3)),
-    )
+    try:
+        plan = build_test_plan(
+            series_name=str(st.session_state["order_mode_test"]),
+            pseudo_seed=s.get("pseudo_seed"),
+            max_consecutive=int(s.get("max_consecutive", 3)),
+        )
+    except Exception as exc:
+        clear_test_state(clear_log=True)
+        st.session_state["mode"] = "idle"
+        set_runtime_error(f"本番系列の生成に失敗しました: {exc}")
+        return
+
     st.session_state["test_plan"] = plan
     st.session_state["schedule_codes"] = plan["schedule_codes"]
     st.session_state["schedule_types"] = plan["schedule_types"]
@@ -1292,10 +1326,6 @@ def start_test():
     st.session_state["test_settings"]["pseudo_seed_used"] = plan.get("pseudo_seed")
     st.session_state["test_settings"]["trial_schedule_codes"] = plan.get("schedule_codes")
     st.session_state["test_settings"]["glide_direction_codes"] = plan.get("glide_dir_codes")
-
-    # Early stop counters
-    st.session_state["ceil_miss_streak"] = 0
-    st.session_state["floor_hit_streak"] = 0
 
     st.session_state["staircase"] = DurationStaircase(
         start_ms=float(s["start_ms"]),
@@ -1322,7 +1352,7 @@ def stop_now():
         st.session_state["mode"] = "idle"
         st.session_state["trial"] = None
         st.session_state["awaiting_answer"] = False
-        st.session_state["last_feedback"] = None
+        clear_practice_state(clear_log=False)
         st.session_state["results_view"] = "練習ログ"
         return
     if st.session_state.get("mode") == "test":
@@ -1354,79 +1384,90 @@ def make_new_trial(mode: str):
     if not settings:
         settings = snapshot_settings()
 
-    glide_no_planned = None
-    glide_dir_code_planned = None
-    glide_dir_label_planned = None
+    try:
+        glide_no_planned = None
+        glide_dir_code_planned = None
+        glide_dir_label_planned = None
 
-    if mode == "practice":
-        trial_type = random.choice(["flat", "glide"])
-        D_ms = int(round(float(settings["ceil_ms"])))  # practice: easy-ish
-        planned_no = len(st.session_state["practice_log"]) + 1
-        planned_code = None
-        direction = random.choice(["up", "down"]) if trial_type == "glide" else "up"
-    else:
-        idx0 = int(st.session_state["test_trial_n"])  # 0-index for schedule
+        if mode == "practice":
+            trial_type = random.choice(["flat", "glide"])
+            D_ms = int(round(float(settings["ceil_ms"])))  # practice: easy-ish
+            planned_no = len(st.session_state["practice_log"]) + 1
+            planned_code = None
+            direction = random.choice(["up", "down"]) if trial_type == "glide" else "up"
+        else:
+            idx0 = int(st.session_state["test_trial_n"])  # 0-index for schedule
 
-        # Frozen schedule (created in start_test)
-        schedule_types = st.session_state.get("schedule_types")
-        schedule_codes = st.session_state.get("schedule_codes")
-        glide_dir_labels = st.session_state.get("glide_dir_labels")
-        glide_dir_codes = st.session_state.get("glide_dir_codes")
+            # Frozen schedule (created in start_test)
+            schedule_types = st.session_state.get("schedule_types")
+            schedule_codes = st.session_state.get("schedule_codes")
+            glide_dir_labels = st.session_state.get("glide_dir_labels")
+            glide_dir_codes = st.session_state.get("glide_dir_codes")
 
-        if not (schedule_types and schedule_codes and glide_dir_labels and glide_dir_codes):
-            # Safety rebuild (should rarely happen)
-            frozen = st.session_state.get("test_settings") or snapshot_settings()
-            plan = build_test_plan(
-                series_name=str(st.session_state.get("order_mode_test", "系列1")),
-                pseudo_seed=frozen.get("pseudo_seed"),
-                max_consecutive=int(frozen.get("max_consecutive", 3)),
-            )
-            st.session_state["test_plan"] = plan
-            st.session_state["schedule_codes"] = plan["schedule_codes"]
-            st.session_state["schedule_types"] = plan["schedule_types"]
-            st.session_state["glide_dir_codes"] = plan["glide_dir_codes"]
-            st.session_state["glide_dir_labels"] = plan["glide_dir_labels"]
-            st.session_state["schedule"] = plan["schedule_types"]
-            schedule_types = plan["schedule_types"]
-            schedule_codes = plan["schedule_codes"]
-            glide_dir_labels = plan["glide_dir_labels"]
-            glide_dir_codes = plan["glide_dir_codes"]
+            if not (schedule_types and schedule_codes and glide_dir_labels and glide_dir_codes):
+                # Safety rebuild (should rarely happen)
+                frozen = st.session_state.get("test_settings") or snapshot_settings()
+                plan = build_test_plan(
+                    series_name=str(st.session_state.get("order_mode_test", "系列1")),
+                    pseudo_seed=frozen.get("pseudo_seed"),
+                    max_consecutive=int(frozen.get("max_consecutive", 3)),
+                )
+                st.session_state["test_plan"] = plan
+                st.session_state["schedule_codes"] = plan["schedule_codes"]
+                st.session_state["schedule_types"] = plan["schedule_types"]
+                st.session_state["glide_dir_codes"] = plan["glide_dir_codes"]
+                st.session_state["glide_dir_labels"] = plan["glide_dir_labels"]
+                st.session_state["schedule"] = plan["schedule_types"]
+                schedule_types = plan["schedule_types"]
+                schedule_codes = plan["schedule_codes"]
+                glide_dir_labels = plan["glide_dir_labels"]
+                glide_dir_codes = plan["glide_dir_codes"]
 
-        if idx0 >= len(schedule_types):
-            finish_test(reason="n_trials")
-            return
+            if idx0 >= len(schedule_types):
+                finish_test(reason="n_trials")
+                return
 
-        trial_type = schedule_types[idx0]
-        sc: DurationStaircase = st.session_state["staircase"]
-        D_ms = int(round(float(sc.x_ms)))
-        planned_no = idx0 + 1
-        planned_code = 1 if trial_type == "flat" else 2
+            trial_type = schedule_types[idx0]
+            sc: DurationStaircase = st.session_state["staircase"]
+            D_ms = int(round(float(sc.x_ms)))
+            planned_no = idx0 + 1
+            planned_code = 1 if trial_type == "flat" else 2
 
-        # Fixed / pseudo-random glide direction (GLIDE trials only)
-        if trial_type == "glide":
-            glide_idx0 = int(list(schedule_codes[:idx0]).count(2))  # 0-based index within glide-only list
-            glide_no_planned = glide_idx0 + 1
-            if 0 <= glide_idx0 < len(glide_dir_labels):
-                glide_dir_label_planned = str(glide_dir_labels[glide_idx0])
-                glide_dir_code_planned = int(glide_dir_codes[glide_idx0])
-            else:
-                glide_dir_label_planned = random.choice(["up", "down"])
-                glide_dir_code_planned = 1 if glide_dir_label_planned == "up" else 2
+            # Fixed / pseudo-random glide direction (GLIDE trials only)
+            if trial_type == "glide":
+                glide_idx0 = int(list(schedule_codes[:idx0]).count(2))  # 0-based index within glide-only list
+                glide_no_planned = glide_idx0 + 1
+                if 0 <= glide_idx0 < len(glide_dir_labels):
+                    glide_dir_label_planned = str(glide_dir_labels[glide_idx0])
+                    glide_dir_code_planned = int(glide_dir_codes[glide_idx0])
+                else:
+                    glide_dir_label_planned = random.choice(["up", "down"])
+                    glide_dir_code_planned = 1 if glide_dir_label_planned == "up" else 2
 
-        direction = str(glide_dir_label_planned) if trial_type == "glide" else "up"
+            direction = str(glide_dir_label_planned) if trial_type == "glide" else "up"
 
-    wav, total_ms = generate_trial_wav_single(
-        sr=int(settings["sr"]),
-        f_center=float(settings["f_center"]),
-        delta=float(settings["delta"]),
-        ramp_ms=int(D_ms),
-        steady_ms=int(settings["steady_ms"]),
-        ear=str(settings["ear"]),
-        edge_ramp_ms=int(settings["edge_ramp_ms"]),
-        target_rms=float(settings["target_rms"]),
-        trial_type=trial_type,
-        direction=direction,
-    )
+        wav, total_ms = generate_trial_wav_single(
+            sr=int(settings["sr"]),
+            f_center=float(settings["f_center"]),
+            delta=float(settings["delta"]),
+            ramp_ms=int(D_ms),
+            steady_ms=int(settings["steady_ms"]),
+            ear=str(settings["ear"]),
+            edge_ramp_ms=int(settings["edge_ramp_ms"]),
+            target_rms=float(settings["target_rms"]),
+            trial_type=trial_type,
+            direction=direction,
+        )
+    except Exception as exc:
+        st.session_state["trial"] = None
+        st.session_state["awaiting_answer"] = False
+        set_runtime_error(f"試行の生成に失敗しました: {exc}")
+        if mode == "test":
+            finish_test(reason="internal_error")
+        else:
+            clear_practice_state(clear_log=False)
+            st.session_state["mode"] = "idle"
+        return
 
     st.session_state["trial"] = {
         "wav": wav,
@@ -1446,7 +1487,7 @@ def make_new_trial(mode: str):
     st.session_state["awaiting_answer"] = True
 
 
-def record_response(subject_id: str, response: str):
+def record_response(response: str):
     """
     response: "change" or "flat"
     """
@@ -1466,7 +1507,6 @@ def record_response(subject_id: str, response: str):
 
     row: Dict[str, Any] = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "subject_id": subject_id,
         "mode": mode,
         "trial_no": None,
         "trial_no_planned": trial.get("trial_no_planned"),
@@ -1603,6 +1643,9 @@ if mode == "idle":
 if mode == "idle":
     errs = st.session_state.get("config_errors", [])
     warns = st.session_state.get("config_warnings", [])
+    runtime_error = st.session_state.get("runtime_error")
+    if runtime_error:
+        st.error(runtime_error)
     if errs:
         st.error("設定に不整合があるため開始できません：\n- " + "\n- ".join(errs))
     if warns:
@@ -1637,60 +1680,81 @@ except Exception as _e:
 d1, d2, d3 = st.columns(3)
 with d1:
     if st.button("🔊 変化あり（UP）", disabled=demo_disabled, key="demo_glide_up"):
-        s = snapshot_settings()
-        wav, total_ms = generate_trial_wav_single(
-            sr=int(s["sr"]),
-            f_center=float(s["f_center"]),
-            delta=float(s["delta"]),
-            ramp_ms=int(DEMO_RAMP_MS),
-            steady_ms=int(s["steady_ms"]),
-            ear=str(s["ear"]),
-            edge_ramp_ms=int(s["edge_ramp_ms"]),
-            target_rms=float(s["target_rms"]),
-            trial_type="glide",
-            direction="up",
-        )
-        st.session_state["demo_wav"] = wav
-        st.session_state["demo_label"] = "GLIDE (UP)"
-        st.session_state["demo_total_ms"] = int(total_ms)
+        try:
+            s = snapshot_settings()
+            wav, total_ms = generate_trial_wav_single(
+                sr=int(s["sr"]),
+                f_center=float(s["f_center"]),
+                delta=float(s["delta"]),
+                ramp_ms=int(DEMO_RAMP_MS),
+                steady_ms=int(s["steady_ms"]),
+                ear=str(s["ear"]),
+                edge_ramp_ms=int(s["edge_ramp_ms"]),
+                target_rms=float(s["target_rms"]),
+                trial_type="glide",
+                direction="up",
+            )
+            st.session_state["demo_wav"] = wav
+            st.session_state["demo_label"] = "GLIDE (UP)"
+            st.session_state["demo_total_ms"] = int(total_ms)
+            set_runtime_error(None)
+        except Exception as exc:
+            st.session_state["demo_wav"] = None
+            st.session_state["demo_label"] = None
+            st.session_state["demo_total_ms"] = None
+            set_runtime_error(f"デモ音声の生成に失敗しました: {exc}")
 
 with d2:
     if st.button("🔊 変化あり（DOWN）", disabled=demo_disabled, key="demo_glide_down"):
-        s = snapshot_settings()
-        wav, total_ms = generate_trial_wav_single(
-            sr=int(s["sr"]),
-            f_center=float(s["f_center"]),
-            delta=float(s["delta"]),
-            ramp_ms=int(DEMO_RAMP_MS),
-            steady_ms=int(s["steady_ms"]),
-            ear=str(s["ear"]),
-            edge_ramp_ms=int(s["edge_ramp_ms"]),
-            target_rms=float(s["target_rms"]),
-            trial_type="glide",
-            direction="down",
-        )
-        st.session_state["demo_wav"] = wav
-        st.session_state["demo_label"] = "GLIDE (DOWN)"
-        st.session_state["demo_total_ms"] = int(total_ms)
+        try:
+            s = snapshot_settings()
+            wav, total_ms = generate_trial_wav_single(
+                sr=int(s["sr"]),
+                f_center=float(s["f_center"]),
+                delta=float(s["delta"]),
+                ramp_ms=int(DEMO_RAMP_MS),
+                steady_ms=int(s["steady_ms"]),
+                ear=str(s["ear"]),
+                edge_ramp_ms=int(s["edge_ramp_ms"]),
+                target_rms=float(s["target_rms"]),
+                trial_type="glide",
+                direction="down",
+            )
+            st.session_state["demo_wav"] = wav
+            st.session_state["demo_label"] = "GLIDE (DOWN)"
+            st.session_state["demo_total_ms"] = int(total_ms)
+            set_runtime_error(None)
+        except Exception as exc:
+            st.session_state["demo_wav"] = None
+            st.session_state["demo_label"] = None
+            st.session_state["demo_total_ms"] = None
+            set_runtime_error(f"デモ音声の生成に失敗しました: {exc}")
 
 with d3:
     if st.button("🔊 変化なし（FLAT）", disabled=demo_disabled, key="demo_flat"):
-        s = snapshot_settings()
-        wav, total_ms = generate_trial_wav_single(
-            sr=int(s["sr"]),
-            f_center=float(s["f_center"]),
-            delta=float(s["delta"]),
-            ramp_ms=int(DEMO_RAMP_MS),
-            steady_ms=int(s["steady_ms"]),
-            ear=str(s["ear"]),
-            edge_ramp_ms=int(s["edge_ramp_ms"]),
-            target_rms=float(s["target_rms"]),
-            trial_type="flat",
-            direction="up",
-        )
-        st.session_state["demo_wav"] = wav
-        st.session_state["demo_label"] = "FLAT"
-        st.session_state["demo_total_ms"] = int(total_ms)
+        try:
+            s = snapshot_settings()
+            wav, total_ms = generate_trial_wav_single(
+                sr=int(s["sr"]),
+                f_center=float(s["f_center"]),
+                delta=float(s["delta"]),
+                ramp_ms=int(DEMO_RAMP_MS),
+                steady_ms=int(s["steady_ms"]),
+                ear=str(s["ear"]),
+                edge_ramp_ms=int(s["edge_ramp_ms"]),
+                target_rms=float(s["target_rms"]),
+                trial_type="flat",
+                direction="up",
+            )
+            st.session_state["demo_wav"] = wav
+            st.session_state["demo_label"] = "FLAT"
+            st.session_state["demo_total_ms"] = int(total_ms)
+            set_runtime_error(None)
+        except Exception as exc:
+            st.session_state["demo_wav"] = None
+            st.session_state["demo_label"] = None
+            st.session_state["demo_total_ms"] = None
+            set_runtime_error(f"デモ音声の生成に失敗しました: {exc}")
 
 if mode == "idle" and st.session_state.get("demo_wav") is not None:
     st.audio(st.session_state["demo_wav"], format="audio/wav", autoplay=True)
@@ -1711,8 +1775,15 @@ st.divider()
 # ============================================================
 # Status metrics (always shown)
 # ============================================================
-sc: Optional[DurationStaircase] = st.session_state.get("staircase", None)
-ts = st.session_state.get("test_settings") or snapshot_settings()
+if mode == "practice":
+    sc = None
+    ts = st.session_state.get("practice_settings") or snapshot_settings()
+elif mode in ["test", "finished"]:
+    sc = st.session_state.get("staircase", None)
+    ts = st.session_state.get("test_settings") or snapshot_settings()
+else:
+    sc = None
+    ts = snapshot_settings()
 
 series_now = st.session_state.get("order_mode_test", "系列1") if st.session_state.get("mode") in ["test", "finished"] else str(order_mode_select)
 
@@ -1769,11 +1840,11 @@ elif mode in ["practice", "test"]:
         a1, a2 = st.columns(2)
         with a1:
             if st.button("変化あり（GLIDE）", key=f"resp_change_{mode}"):
-                record_response(subject_id, "change")
+                record_response("change")
                 st.rerun()
         with a2:
             if st.button("変化なし（FLAT）", key=f"resp_flat_{mode}"):
-                record_response(subject_id, "flat")
+                record_response("flat")
                 st.rerun()
 
 elif mode == "finished":
@@ -1952,7 +2023,6 @@ else:
             started_at=st.session_state.get("started_at"),
             finished_at=st.session_state.get("finished_at"),
         )
-        subject_part = safe_filename_part(get_subject_id_from_df(dft))
         finished_at = st.session_state.get("finished_at")
         finished_tag = (
             time.strftime("%Y%m%d_%H%M%S", time.localtime(float(finished_at)))
@@ -1963,7 +2033,7 @@ else:
         st.download_button(
             "⬇️ Summary .txt をダウンロード",
             data=summary_text.encode("utf-8-sig"),
-            file_name=f"pitch_glide_summary_{subject_part}_{finished_tag}.txt",
+            file_name=f"pitch_glide_summary_{finished_tag}.txt",
             mime="text/plain",
             key="download_summary_txt",
         )
