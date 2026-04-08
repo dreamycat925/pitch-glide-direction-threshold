@@ -1116,6 +1116,14 @@ with st.sidebar:
 
     st.divider()
     st.subheader("練習（任意）")
+    practice_duration_ms = st.number_input(
+        "練習用 D (ms)",
+        min_value=20,
+        max_value=2000,
+        value=600,
+        step=20,
+        help="練習モードのGLIDE durationです。本番のstaircaseとは独立しています。",
+    )
     practice_must = st.checkbox("練習で5連続HIT（GLIDE）を目標（推奨）", value=True)
 
     st.divider()
@@ -1145,6 +1153,7 @@ def snapshot_settings() -> Dict[str, Any]:
         "step_big_ms": float(step_big_ms),
         "step_small_ms": float(step_small_ms),
         "switch_after": int(switch_after),
+        "practice_duration_ms": float(practice_duration_ms),
         "practice_must": bool(practice_must),
     }
 
@@ -1234,6 +1243,10 @@ def validate_settings(s: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     if step_small > step_big:
         warnings.append("小ステップが大ステップより大きいです（意図した設定か確認してください）。")
+
+    practice_duration = float(s.get("practice_duration_ms", 0.0))
+    if practice_duration <= 0:
+        errors.append("練習用 D は 0 より大きい値にしてください。")
 
     # --- Fade vs minimum total duration ---
     total_min = int(round(floor)) + int(steady)
@@ -1391,7 +1404,7 @@ def make_new_trial(mode: str):
 
         if mode == "practice":
             trial_type = random.choice(["flat", "glide"])
-            D_ms = int(round(float(settings["ceil_ms"])))  # practice: easy-ish
+            D_ms = int(round(float(settings["practice_duration_ms"])))
             planned_no = len(st.session_state["practice_log"]) + 1
             planned_code = None
             direction = random.choice(["up", "down"]) if trial_type == "glide" else "up"
