@@ -1,313 +1,313 @@
 # Pitch Glide Detection Threshold Test
 
-Streamlit で動く、**単発刺激（single-interval）** の **Pitch Glide / Pitch Change Detection Threshold Test** です。  
-1 試行ごとに 1 音だけ提示し、その音が **平坦（FLAT）** だったか、**高さが変化した（GLIDE）** かを回答してもらいます。
+This is a **single-interval** **Pitch Glide / Pitch Change Detection Threshold Test** implemented in Streamlit.  
+On each trial, only **one sound** is presented, and the participant answers whether it was **flat (FLAT)** or **changed in pitch (GLIDE)**.
 
-このアプリでは、**GLIDE を検出できる最小のグライド長 D（ms）** を staircase で推定します。
+This app estimates the **minimum glide duration D (ms)** at which a **GLIDE** can be detected, using a staircase procedure.
 
-> **用途**: 研究・試作・評価用  
-> **注意**: 医療機器ではありません。ヘッドホン、再生デバイス、ブラウザ、周囲環境、音量設定の影響を受けます。
+> **Intended use**: research, prototyping, and evaluation  
+> **Note**: This is not a medical device. Results are affected by headphones, playback device, browser, ambient environment, and volume settings.
 
-> **運用想定**: 画面は検査者が操作し、被験者は画面を見ずに口頭で応答します。検査者が回答ボタンを入力します。
-
----
-
-## できること
-
-- 単発提示で **FLAT / GLIDE 判定** を行う
-- 本番では **100 trial 固定**（FLAT=40 / GLIDE=60）
-- 系列は **系列1 / 系列2 / 擬似ランダム** から選択可能
-- staircase は **GLIDE 試行だけ** で更新
-- **2-down 1-up** で D（グライド長, ms）を調整
-- **正式閾値** に加え、100 trial 時点などで未収束の場合は **参考値** を表示
-- Summary で **収束の折れ線グラフ** を表示
-  - **青ダイヤ** = big-step reversal
-  - **赤ダイヤ** = small-step reversal
-- 練習 / 本番では、**音声プレイヤーと回答ボタンを最初から表示**
-  - **「提示」ボタンは不要**
-  - 上段で音声を再生し、下段で **GLIDE / FLAT** を回答
-- 練習ログ / 本番ログの **CSV ダウンロード**
-- 結果サマリーと実施条件をまとめた **Summary .txt ダウンロード**
+> **Operational assumption**: The examiner operates the screen, while the participant responds verbally without looking at it. The examiner enters the response using the buttons.
 
 ---
 
-## 検査の考え方
+## What This App Can Do
 
-### 1. 刺激形式
+- Perform **FLAT / GLIDE judgments** using single-interval presentation
+- Run a fixed **100-trial** test session (**FLAT = 40 / GLIDE = 60**)
+- Select from **Series 1 / Series 2 / pseudo-random** trial schedules
+- Update the staircase on **GLIDE trials only**
+- Adjust **D (glide duration in ms)** using a **2-down 1-up** rule
+- Show not only the **official threshold**, but also a **reference value** when 100 trials end before full convergence
+- Display a **convergence line chart** in the Summary
+  - **Blue diamonds** = big-step reversals
+  - **Red diamonds** = small-step reversals
+- Show the **audio player and response buttons from the beginning** in both practice and test modes
+  - There is **no separate “Present” button**
+  - Audio is played from the upper section, and the examiner answers **GLIDE / FLAT** in the lower section
+- Download **practice logs / test logs** as CSV
+- Download a **Summary .txt** file containing the result summary and test conditions
 
-1 試行で提示されるのは **1 音のみ**です。被験者は次の 2 択で回答します。
+---
 
-- **変化あり（GLIDE）**
-- **変化なし（FLAT）**
+## Test Concept
 
-2 区間比較（2AFC）ではなく単発提示にしているため、比較負荷を下げやすい設計です。
+### 1. Stimulus format
 
-### 2. GLIDE と FLAT
+Each trial presents **only one sound**. The participant gives one of two responses:
+
+- **Change present (GLIDE)**
+- **No change (FLAT)**
+
+This design uses single-interval presentation rather than two-interval comparison (2AFC), which can reduce comparison load.
+
+### 2. GLIDE and FLAT
 
 - **GLIDE**
-  - 周波数が単調に変化する linear ramp を提示
-  - 方向は `up` または `down`
-  - ramp の長さが **D（ms）**
-  - ramp 後に必要に応じて **steady_ms** の定常部を付加
+  - A linear frequency ramp with monotonic frequency change is presented
+  - Direction is `up` or `down`
+  - Ramp length is **D (ms)**
+  - After the ramp, an optional steady portion of **steady_ms** can be added
 - **FLAT**
-  - 周波数変化のない定常音
-  - 長さは GLIDE と揃うように **total_ms = D + steady_ms**
+  - A steady tone with no frequency change
+  - Its duration is matched to GLIDE using **total_ms = D + steady_ms**
 
-### 3. 閾値
+### 3. Threshold
 
-このアプリで推定するのは **GLIDE duration D（ms）** です。  
-「どのくらいの長さのグライドなら、被験者が高さの変化を検出できるか」を見ます。
+This app estimates **GLIDE duration D (ms)**.  
+In other words, it measures **how long a glide must be for the participant to detect the pitch change**.
 
 ---
 
-## 刺激仕様
+## Stimulus Specifications
 
-### 周波数プリセット
+### Frequency presets
 
-- **1240 Hz版（F2帯寄り：900–1580 Hz）**
+- **1240 Hz version (around the F2 region: 900–1580 Hz)**
   - `f_center = 1240 Hz`
-  - 既定 `Δf = ±340 Hz`
-- **500 Hz版（低周波：350–650 Hz）**
+  - Default `Δf = ±340 Hz`
+- **500 Hz version (low-frequency range: 350–650 Hz)**
   - `f_center = 500 Hz`
-  - 既定 `Δf = ±150 Hz`
+  - Default `Δf = ±150 Hz`
 
-`Δf` はサイドバーから変更できます。  
-ただし、開始周波数が 0 Hz 以下にならないよう **Δf < f_center** を満たす必要があります。
+`Δf` can be changed from the sidebar.  
+However, it must satisfy **Δf < f_center** so that the starting frequency never falls to 0 Hz or below.
 
-### 出力
+### Output
 
-- 両耳
-- 左耳のみ
-- 右耳のみ
+- Binaural
+- Left ear only
+- Right ear only
 
-### 音声生成
+### Audio generation
 
-- サンプリング周波数: **48,000 Hz 固定**
-- フェード: cosine ramp
-- RMS 正規化: `target_rms` を使用
-- GLIDE は **中心周波数に向かう linear ramp**
+- Sampling frequency: **fixed at 48,000 Hz**
+- Fade: cosine ramp
+- RMS normalization: uses `target_rms`
+- GLIDE uses a **linear ramp toward the center frequency**
   - `up`: `(f_center - Δf) → f_center`
   - `down`: `(f_center + Δf) → f_center`
-- `steady_ms = 0` も設定可能
+- `steady_ms = 0` is also allowed
 
 ---
 
-## デモ音声（試聴）
+## Demo Audio (for listening)
 
-画面上部に、ルール説明用のデモ音声があります。
+At the top of the screen, demo audio is provided for explaining the rule.
 
-- **変化あり（UP）**
-- **変化あり（DOWN）**
-- **変化なし（FLAT）**
+- **Change present (UP)**
+- **Change present (DOWN)**
+- **No change (FLAT)**
 
-仕様は次のとおりです。
+Specifications are as follows:
 
-- デモのグライド長は **D = 300 ms 固定**
-- FLAT は `D + steady_ms` に合わせた長さで提示
-- **ログには残りません**
-- staircase や結果には影響しません
-- 練習 / 本番中は再生不可です
+- Demo glide duration is fixed at **D = 300 ms**
+- FLAT is presented with a duration matched to `D + steady_ms`
+- **It is not recorded in the logs**
+- It does not affect the staircase or the results
+- It cannot be played during practice or test sessions
 
 ---
 
-## 本番の試行系列
+## Test Trial Schedule
 
-### 固定系列
+### Fixed schedules
 
-本番は **100 trial 固定**です。
+The test session is fixed at **100 trials**.
 
-- **FLAT = 40 trial**
-- **GLIDE = 60 trial**
+- **FLAT = 40 trials**
+- **GLIDE = 60 trials**
 
-固定系列として以下を選べます。
+You can select one of the following fixed schedules:
 
-- **系列1**
-- **系列2**
+- **Series 1**
+- **Series 2**
 
-### 擬似ランダム
+### Pseudo-random
 
-擬似ランダムも選択できます。
+A pseudo-random schedule is also available.
 
-- exact counts: `1×40`, `2×60`
+- Exact counts: `1×40`, `2×60`
 - `1 = FLAT`, `2 = GLIDE`
-- 同一値の連続は **最大 3 回まで**
-- seed を指定可能
-- 本番開始時に系列が固定され、Summary に再現情報が残ります
+- Maximum run length of the same value: **3**
+- A seed can be specified
+- The schedule is fixed when the test starts, and the reproducibility information is saved in the Summary
 
-### GLIDE 方向系列
+### GLIDE direction schedule
 
-本番の GLIDE 方向も固定されます。
+The GLIDE direction sequence is also fixed for the test session.
 
 - `1 = up`
 - `2 = down`
-- 合計 60 個
+- Total of 60 items
 - **up = 30 / down = 30**
 
-固定系列では方向系列も固定、擬似ランダムでは seed に基づいて固定されます。
+For fixed schedules, the direction sequence is also fixed. For pseudo-random schedules, it is fixed based on the seed.
 
 ---
 
-## Staircase 仕様
+## Staircase Specifications
 
-### 更新対象
+### What gets updated
 
-staircase は **GLIDE 試行のみ** で更新します。  
-FLAT 試行は期待形成の抑制や false alarm の確認には使いますが、D の更新には使いません。
+The staircase is updated on **GLIDE trials only**.  
+FLAT trials are used to reduce expectancy effects and to check false alarms, but they do not update D.
 
-### ルール
+### Rule
 
-**2-down 1-up（signal-only）** を採用しています。
+The app uses **2-down 1-up (signal-only)**.
 
-- GLIDE で **2 回連続 HIT** → D を下げる（難しくする）
-- GLIDE で **1 回 MISS** → D を上げる（易しくする）
+- **2 consecutive HITs** on GLIDE trials → decrease D (make it harder)
+- **1 MISS** on a GLIDE trial → increase D (make it easier)
 
-### ステップ幅
+### Step sizes
 
-- **大ステップ**: reversal が一定数に達するまで使用
-- **小ステップ**: その後に使用
+- **Big step**: used until a certain number of reversals is reached
+- **Small step**: used after that
 
-初期値:
+Default values:
 
-- 開始 D: `300 ms`
+- Starting D: `300 ms`
 - D_min: `20 ms`
 - D_max: `600 ms`
-- 大ステップ: `40 ms`
-- 小ステップ: `20 ms`
-- 大→小 切替 reversal 数: `4`
+- Big step: `40 ms`
+- Small step: `20 ms`
+- Reversal count for switching big → small: `4`
 
-### 正式閾値と参考値
+### Official threshold and reference values
 
-small-step reversals の個数に応じて、Summary の表示内容が変わります。
+The content shown in the Summary depends on the number of small-step reversals.
 
-- **0–1 個**: 参考値なし
-- **2 個**: 参考値（中央値） + 参考範囲（min–max）
-- **3–5 個**: 参考値（暫定中央値）
-- **6 個以上**: 正式閾値
+- **0–1**: no reference value
+- **2**: reference value (median) + reference range (min–max)
+- **3–5**: reference value (provisional median)
+- **6 or more**: official threshold
 
-正式閾値は、**小ステップ期の最後 6 reversals の中央値** です。  
-平均値も参考として併記されます。
-
----
-
-## 停止条件
-
-本番は次のいずれかで終了します。
-
-- **small-step reversals が 6 個** 集まった
-- **D_max で 2 回連続 MISS**（GLIDE 試行）
-- **D_min で 4 回連続 HIT**（GLIDE 試行）
-- **100 trial 到達**
-- **手動終了**
-
-Summary では、終了理由も表示されます。
+The official threshold is defined as the **median of the last 6 reversals in the small-step phase**.  
+The mean is also shown as a reference.
 
 ---
 
-## 練習モード
+## Stop Criteria
 
-練習は任意です。
+The test ends when any of the following conditions is met:
 
-- FLAT / GLIDE は **50/50 ランダム**
-- GLIDE の D は、サイドバーの **練習用 D (ms)** で固定指定
-- GLIDE 方向は練習中のみランダム
-- 正誤フィードバックあり
-- **GLIDE の HIT だけ** を連続正答として数える
+- **6 small-step reversals** have been collected
+- **2 consecutive MISS responses at D_max** (GLIDE trials)
+- **4 consecutive HIT responses at D_min** (GLIDE trials)
+- **100 trials reached**
+- **Manual stop**
 
-初期値は **600 ms** です。必要に応じて **200 ms** など、やや難しい条件にも変更できます。  
-この設定は **本番の staircase とは独立**しており、練習開始時の値で固定されます。
-
-`練習で5連続HIT（GLIDE）を目標` をオンにしている場合、**5 連続 HIT** で練習は自動終了します。  
-FLAT 試行はこの連続カウントに影響しません。
+The Summary also shows the reason for stopping.
 
 ---
 
-## 検査画面のレイアウト
+## Practice Mode
 
-練習・本番の試行画面は、次の並びで表示されます。
+Practice is optional.
 
-1. **上段**: 音声プレイヤー
-2. **下段**: 質問文
-3. **最下段**: **変化あり（GLIDE） / 変化なし（FLAT）** の回答ボタン
+- FLAT / GLIDE are randomized at **50/50**
+- GLIDE duration D is fixed using **Practice D (ms)** in the sidebar
+- GLIDE direction is randomized only in practice mode
+- Correct/incorrect feedback is shown
+- Only **GLIDE HITs** count toward the consecutive-correct streak
 
-### ポイント
+The default is **600 ms**. If needed, it can be changed to a more difficult condition such as **200 ms**.  
+This setting is **independent from the staircase used in the test** and is fixed when practice starts.
 
-- **「提示」ボタンはありません**
-- 新しい試行は自動で準備されます
-- 被験者は **上の再生ボタン** で音を聞いてから回答します
-- 練習では回答後に正誤フィードバックが表示されます
-- 本番では正誤フィードバックは表示されません
-
----
-
-## Summary に表示される内容
-
-本番終了後の **結果サマリー** では、次の情報を確認できます。
-
-- trial 数
-- 正答率
-- HIT率（GLIDE）
-- FA率（FLAT）
-- 正式閾値または参考値
-- 小ステップ期 reversals 数
-- 反応内訳（HIT / MISS / FA / CR）
-- 終了条件
-- 実施条件のスナップショット
-- 使用系列・seed・GLIDE方向系列
-- reversals テーブル
-
-### 収束の折れ線グラフ
-
-Summary には、収束の程度を視覚的に確認するための折れ線グラフがあります。
-
-- 縦軸: 提示した **D (ms)**
-- 横軸: **総試行数ではなく GLIDE 提示数**
-- reversal 点を重ねて表示
-  - **青ダイヤ** = big-step reversal
-  - **赤ダイヤ** = small-step reversal
-- 正式閾値または参考値がある場合は水平線も表示
+If `Target 5 consecutive HITs (GLIDE) in practice` is enabled, practice ends automatically after **5 consecutive HITs**.  
+FLAT trials do not affect this streak count.
 
 ---
 
-## ダウンロードできるファイル
+## Layout of the Test Screen
 
-### 1. 練習ログ CSV
+The practice and test trial screens are displayed in the following order:
 
-- ファイル名: `pitch_glide_practice_log.csv`
+1. **Top section**: audio player
+2. **Middle section**: question text
+3. **Bottom section**: response buttons for **Change present (GLIDE) / No change (FLAT)**
 
-### 2. 本番ログ CSV
+### Key points
 
-- ファイル名: `pitch_glide_test_log.csv`
+- There is **no “Present” button**
+- Each new trial is prepared automatically
+- The participant listens to the sound using the **play button above**, then answers
+- In practice mode, correct/incorrect feedback is shown after each response
+- In test mode, no correctness feedback is shown
+
+---
+
+## Information Displayed in the Summary
+
+After the test ends, the **result summary** shows the following:
+
+- Number of trials
+- Accuracy
+- HIT rate (GLIDE)
+- FA rate (FLAT)
+- Official threshold or reference value
+- Number of small-step reversals
+- Response counts (HIT / MISS / FA / CR)
+- Stop condition
+- Snapshot of test settings
+- Trial schedule / seed / GLIDE direction schedule used
+- Reversals table
+
+### Convergence line chart
+
+The Summary includes a line chart for visually checking convergence.
+
+- Vertical axis: presented **D (ms)**
+- Horizontal axis: **number of GLIDE presentations, not total trial count**
+- Reversal points are overlaid
+  - **Blue diamonds** = big-step reversals
+  - **Red diamonds** = small-step reversals
+- If an official threshold or reference value exists, a horizontal line is also shown
+
+---
+
+## Downloadable Files
+
+### 1. Practice log CSV
+
+- File name: `pitch_glide_practice_log.csv`
+
+### 2. Test log CSV
+
+- File name: `pitch_glide_test_log.csv`
 
 ### 3. Summary .txt
 
-- 結果サマリー
-- 閾値 / 参考値
-- 実施条件
-- 使用系列
-- reversals
+You can download a single `.txt` file containing:
 
-を 1 つの `.txt` にまとめてダウンロードできます。
+- Result summary
+- Threshold / reference value
+- Test conditions
+- Trial schedule used
+- Reversals
 
 ---
 
-## ローカルでの起動
+## Running Locally
 
-### 1. Python で直接起動
+### 1. Run directly with Python
 
 ```bash
 pip install -r requirements.txt
 streamlit run pitch-glide-direction-threshold.py
 ```
 
-### 2. Docker / Docker Compose で起動
+### 2. Run with Docker / Docker Compose
 
-Docker を使う場合は `README_DOCKER.md` を参照してください。
+If you want to use Docker, see `README_DOCKER.md`.
 
 ---
 
-## 注意点
+## Notes
 
-- 絶対音圧（dB SPL）の校正はしていません
-- ブラウザや OS によって音声挙動が少し異なることがあります
-- Bluetooth は遅延や内部処理の影響があるため、閾値測定では非推奨です
-- 臨床利用を前提とする場合は、再生デバイス、ヘッドホン、環境、音量条件を記録してください
+- Absolute sound pressure level (dB SPL) is not calibrated
+- Audio behavior may differ slightly depending on the browser or operating system
+- Bluetooth is not recommended for threshold measurement because of latency and internal processing
+- If used in a clinical context, record the playback device, headphones, environment, and volume conditions
