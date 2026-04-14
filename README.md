@@ -9,6 +9,7 @@ This app estimates the **minimum glide duration D (ms)** at which a **GLIDE** ca
 > **Note**: This is not a medical device. Results are affected by headphones, playback device, browser, ambient environment, and volume settings.
 
 > **Operational assumption**: The examiner operates the screen, while the participant responds verbally without looking at it. The examiner enters the response using the buttons.
+> If a response is entered incorrectly, the examiner can press **Back one trial** to restore the immediately previous trial and re-enter the answer.
 
 ---
 
@@ -26,6 +27,10 @@ This app estimates the **minimum glide duration D (ms)** at which a **GLIDE** ca
 - Show the **audio player and response buttons from the beginning** in both practice and test modes
   - There is **no separate “Present” button**
   - Audio is played from the upper section, and the examiner answers **GLIDE / FLAT** in the lower section
+- Show a **Back one trial** button below the response buttons
+  - Restores the immediately previous trial so the examiner can correct a mistyped response
+  - Can be used repeatedly with no preset limit
+  - Remains available even after **PASS / FAIL / convergence / manual stop**
 - Download **practice logs / test logs** as CSV
 - Download a **Summary .txt** file containing the result summary and test conditions
 

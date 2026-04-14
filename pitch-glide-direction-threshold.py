@@ -1,3 +1,4 @@
+import copy
 import io
 import json
 import random
@@ -56,6 +57,37 @@ FINISH_REASON_LABELS = {
     "manual": "手動終了",
     "internal_error": "内部エラー",
 }
+
+UNDO_STATE_KEYS = [
+    "mode",
+    "practice_streak",
+    "practice_log",
+    "test_log",
+    "trial",
+    "awaiting_answer",
+    "staircase",
+    "test_trial_n",
+    "threshold_live_mean",
+    "threshold_live_median",
+    "threshold_final_mean",
+    "threshold_final_median",
+    "started_at",
+    "finished_at",
+    "finished_reason",
+    "test_settings",
+    "practice_settings",
+    "test_plan",
+    "schedule",
+    "schedule_codes",
+    "schedule_types",
+    "glide_dir_codes",
+    "glide_dir_labels",
+    "order_mode_test",
+    "results_view",
+    "last_feedback",
+    "ceil_miss_streak",
+    "floor_hit_streak",
+]
 
 # -------------------------
 # Fixed test series (1=FLAT, 2=GLIDE) — length 100
@@ -948,6 +980,7 @@ def init_state():
         "demo_label": None,
         "demo_total_ms": None,
         "runtime_error": None,
+        "undo_history": [],
         # early stop streaks (GLIDE trials only; FLAT does not reset)
         "ceil_miss_streak": 0,
         "floor_hit_streak": 0,
@@ -1000,6 +1033,43 @@ def clear_test_state(*, clear_log: bool):
 
 def set_runtime_error(message: Optional[str]):
     st.session_state["runtime_error"] = None if message is None else str(message)
+
+
+def clear_undo_history():
+    st.session_state["undo_history"] = []
+
+
+def snapshot_undo_state() -> Dict[str, Any]:
+    return {key: copy.deepcopy(st.session_state.get(key)) for key in UNDO_STATE_KEYS}
+
+
+def push_undo_state():
+    if not st.session_state.get("awaiting_answer") or st.session_state.get("trial") is None:
+        return
+    history = list(st.session_state.get("undo_history", []))
+    history.append(snapshot_undo_state())
+    st.session_state["undo_history"] = history
+
+
+def can_undo_last_response() -> bool:
+    return len(st.session_state.get("undo_history", [])) > 0
+
+
+def undo_last_response():
+    history = list(st.session_state.get("undo_history", []))
+    if not history:
+        return
+    snapshot = history.pop()
+    for key, value in snapshot.items():
+        st.session_state[key] = value
+    st.session_state["undo_history"] = history
+    set_runtime_error(None)
+
+
+def render_undo_button(*, key: str):
+    if st.button("ひとつ前に戻る", key=key, disabled=(not can_undo_last_response())):
+        undo_last_response()
+        st.rerun()
 
 
 init_state()
@@ -1281,6 +1351,7 @@ def start_practice():
     st.session_state["mode"] = "practice"
     clear_test_state(clear_log=False)
     clear_practice_state(clear_log=True)
+    clear_undo_history()
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
     st.session_state["practice_settings"] = s
@@ -1305,6 +1376,7 @@ def start_test():
     st.session_state["mode"] = "test"
     clear_practice_state(clear_log=False)
     clear_test_state(clear_log=True)
+    clear_undo_history()
     st.session_state["trial"] = None
     st.session_state["awaiting_answer"] = False
     st.session_state["started_at"] = time.time()
@@ -1508,6 +1580,8 @@ def record_response(response: str):
     trial = st.session_state.get("trial") or {}
     if not trial:
         return
+
+    push_undo_state()
 
     trial_type = trial["trial_type"]
     is_signal = (trial_type == "glide")
@@ -1827,6 +1901,9 @@ st.caption(
 # ============================================================
 if mode == "idle":
     st.info("上のボタンから **練習** または **本番** を開始してください。設定は左のサイドバーで変更できます。")
+    if can_undo_last_response():
+        st.caption("直前の回答を修正する場合は、下のボタンでひとつ前の試行に戻れます。")
+        render_undo_button(key="undo_idle")
 
 elif mode in ["practice", "test"]:
     label = "🧪 練習" if mode == "practice" else "🎯 本番"
@@ -1859,11 +1936,14 @@ elif mode in ["practice", "test"]:
             if st.button("変化なし（FLAT）", key=f"resp_flat_{mode}"):
                 record_response("flat")
                 st.rerun()
+        render_undo_button(key=f"undo_{mode}")
 
 elif mode == "finished":
     st.subheader("✅ 本番終了（結果サマリーは下）")
     reason = st.session_state.get("finished_reason", "n_trials")
     st.caption(f"終了条件：**{finish_reason_label(reason)}**")
+    st.caption("終了後でも、直前の回答を修正する場合はひとつ前の試行に戻れます。")
+    render_undo_button(key="undo_finished")
 
 # ============================================================
 # 📌 Logs / Results (always visible) — button switch
